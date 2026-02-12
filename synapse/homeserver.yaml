@@ -1,0 +1,61 @@
+server_name: "claudebridge"
+pid_file: /data/homeserver.pid
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: false
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [client, federation]
+        compress: false
+
+database:
+  name: sqlite3
+  args:
+    database: /data/homeserver.db
+
+log_config: "/data/log.config"
+
+media_store_path: /data/media_store
+uploads_path: /data/uploads
+
+# Registration — closed to public, shared secret for CLI user creation
+enable_registration: false
+registration_shared_secret: "REPLACE_ME_ON_FIRST_RUN"
+
+# Federation — disabled (private instance)
+federation_domain_whitelist: []
+
+# Signing key — auto-generated on first start
+signing_key_path: "/data/signing.key"
+
+# Trusted key servers — none needed for private instance
+trusted_key_servers: []
+
+# Suppress key server warning since we intentionally have none
+suppress_key_server_warning: true
+
+# Rate limiting — relaxed for bot traffic
+rc_message:
+  per_second: 20
+  burst_count: 50
+
+rc_login:
+  address:
+    per_second: 5
+    burst_count: 10
+  account:
+    per_second: 5
+    burst_count: 10
+
+# Max upload size
+max_upload_size: 10M
+
+# Retention — keep messages for 90 days
+retention:
+  enabled: true
+  default_policy:
+    min_lifetime: 1d
+    max_lifetime: 90d

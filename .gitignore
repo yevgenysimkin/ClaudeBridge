@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+
+# Build output
+bot/dist/
+
+# Synapse data (managed by Docker/Railway volumes)
+synapse/data/
+synapse/*.db
+synapse/*.log
+synapse/signing.key
+synapse/media_store/
+
+# Matrix bot storage
+.matrix-storage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Railway
+.railway/

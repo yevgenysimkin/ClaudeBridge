@@ -1,0 +1,15 @@
+{
+  "agents": [
+    {
+      "id": "example",
+      "name": "Example Agent",
+      "cwd": "/tmp/example-project",
+      "model": "claude-sonnet-4-5-20250929",
+      "maxTurns": 50,
+      "maxBudgetUsd": 5.0,
+      "permissionMode": "default",
+      "autoStart": false,
+      "systemPrompt": "You are a helpful coding assistant."
+    }
+  ]
+}

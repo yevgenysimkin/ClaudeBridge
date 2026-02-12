@@ -1,0 +1,26 @@
+{
+  "name": "claudebridge-bot",
+  "version": "0.1.0",
+  "description": "Bridge bot connecting Claude Agent SDK sessions to Matrix/Element",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.39",
+    "dotenv": "^16.4.7",
+    "matrix-bot-sdk": "^0.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
