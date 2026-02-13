@@ -3,7 +3,7 @@
     {
       "id": "example",
       "name": "Example Agent",
-      "cwd": "/tmp/example-project",
+      "cwd": "/Users/yevgenysimkin/AfM/ClaudeBridge",
       "model": "claude-sonnet-4-5-20250929",
       "maxTurns": 50,
       "maxBudgetUsd": 5.0,

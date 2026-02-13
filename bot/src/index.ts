@@ -1,64 +1,56 @@
-import "dotenv/config";
+import { config } from "dotenv";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+config({ path: resolve(__dirname, "../../.env") });
+
 import { loadEnvConfig, loadAgentConfigs } from "./config.js";
-import { BridgeMatrixClient } from "./matrix-client.js";
+import { RelayClient } from "./relay-client.js";
 import { AgentManager } from "./agent-manager.js";
-import { handleOpsCommand } from "./commands.js";
 
 async function main(): Promise<void> {
-  console.log("ClaudeBridge starting...");
+  console.log("ClaudeBridge Bot starting...");
 
-  // --- Load configuration ---
   const envConfig = loadEnvConfig();
   const agentConfigs = loadAgentConfigs();
 
-  console.log(`[config] Homeserver: ${envConfig.matrixHomeserverUrl}`);
-  console.log(`[config] Bot user: ${envConfig.matrixBotUser}`);
-  console.log(`[config] Admin user: ${envConfig.matrixAdminUser}`);
+  console.log(`[config] Relay: ${envConfig.relayUrl}`);
   console.log(`[config] Model: ${envConfig.claudeModel}`);
   console.log(`[config] Agents: ${agentConfigs.map((a) => a.id).join(", ") || "(none)"}`);
 
-  // --- Initialize Matrix client ---
-  const matrix = new BridgeMatrixClient(envConfig);
+  // Connect to relay
+  const relay = new RelayClient(envConfig.relayUrl, envConfig.relayAuthToken);
+  const manager = new AgentManager(relay, envConfig);
 
-  // --- Initialize Agent Manager ---
-  const manager = new AgentManager(matrix, envConfig);
-
-  // --- Wire Matrix messages to manager + command handler ---
-  matrix.onMessage(async (roomId, sender, body) => {
-    // Only respond to admin
-    if (sender !== envConfig.matrixAdminUser) return;
-
-    const opsRoomId = matrix.getOpsRoomId();
-
-    // Ops room: try command first, then fall through to manager
-    if (roomId === opsRoomId) {
-      const handled = await handleOpsCommand(
-        body,
-        manager,
-        (text) => matrix.sendText(roomId, text),
-      );
-      if (handled) return;
-    }
-
-    // Route to manager (handles agent room messages + ops room fallback)
-    await manager.handleMessage(roomId, sender, body);
+  // Route relay messages to the manager
+  relay.onMessage(async (msg) => {
+    await manager.handleRelayMessage(msg);
   });
 
-  // --- Start Matrix sync ---
-  await matrix.start();
+  // Connect and wait for auth
+  relay.connect();
 
-  // --- Initialize rooms and agents ---
+  // Wait for connection before initializing
+  await new Promise<void>((resolve) => {
+    const check = setInterval(() => {
+      if (relay.isConnected) {
+        clearInterval(check);
+        resolve();
+      }
+    }, 200);
+  });
+
+  // Initialize agents
   await manager.initialize(agentConfigs);
+  console.log("ClaudeBridge Bot is running.");
 
-  console.log("ClaudeBridge is running.");
-
-  // --- Graceful shutdown ---
+  // Graceful shutdown
   const shutdown = () => {
     console.log("\nShutting down...");
-    matrix.stop();
+    relay.stop();
     process.exit(0);
   };
-
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 }

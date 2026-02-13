@@ -1,6 +1,6 @@
 # ClaudeBridge
 
-A bridge that connects multiple Claude Code sessions to a Matrix/Element chat server. Monitor and interact with your Claude agents — including permission approvals — from your phone or desktop.
+Monitor and interact with multiple Claude Code sessions from your phone. Approve permissions, send messages, and track agent activity — all via a native Android app.
 
 ## How It Works
 
@@ -8,15 +8,16 @@ A bridge that connects multiple Claude Code sessions to a Matrix/Element chat se
 YOUR LAPTOP                              RAILWAY (always-on)
 ───────────────────                      ─────────────────────────
 Claude Agent SDK sessions ──┐            ┌─────────────────────┐
-  (edit local files)        ├──outbound──│  Synapse (Matrix)    │──▶ Element
-Bridge Bot (Node.js)  ──────┘            │  (always reachable)  │◀── Element
+  (edit local files)        ├──outbound──│  WebSocket Relay     │──▶ Android App
+Bridge Bot (Node.js)  ──────┘            │  (SQLite persistence)│◀── Android App
                                          └─────────────────────┘
 ```
 
-- **Synapse** (Matrix homeserver) runs on Railway — always reachable from your phone
-- **Bridge Bot** runs on your laptop, connects outbound to Railway (no VPN needed)
-- **Agent SDK sessions** run locally with full filesystem access to your projects
-- Messages queue in Synapse if your laptop is asleep — bot picks up on wake
+- **Relay** runs on Railway — a lightweight WebSocket server (~200 lines) with SQLite message persistence
+- **Bridge Bot** runs on your laptop, connects outbound to the relay (no VPN needed)
+- **Agent SDK sessions** run locally with full filesystem access
+- **Android app** connects via WSS — foreground service keeps the connection alive for notifications
+- Messages queue in the relay if your laptop sleeps — bot picks up on wake
 
 ## Quick Start
 
@@ -24,42 +25,37 @@ Bridge Bot (Node.js)  ──────┘            │  (always reachable)  
 
 - Node.js 22+
 - Railway CLI (`npm i -g @railway/cli && railway login`)
-- `jq`, `curl`, `openssl`
-- An Anthropic API key
+- Android Studio (for building the APK) or a pre-built APK
+- Claude Code CLI authenticated (Max plan — no API key needed)
 
-### 1. Deploy Synapse to Railway
+### 1. Deploy Relay to Railway
 
 ```bash
 git clone https://github.com/yevgenysimkin/ClaudeBridge.git
 cd ClaudeBridge
 
-# Deploy Synapse to Railway
-./scripts/deploy-railway.sh
+# Generate an auth token
+AUTH_TOKEN=$(openssl rand -base64 32)
+echo "Your auth token: $AUTH_TOKEN"
+
+# Deploy to Railway (set up a new project, link relay/ as the service)
+cd relay && npm install && npm run build
+railway link
+railway variables set AUTH_TOKEN="$AUTH_TOKEN" PORT=3000
+railway up
 ```
 
-Then in the Railway dashboard:
-1. Add a **volume** mounted at `/data` (Settings → Volumes)
-2. Generate a **public domain** (Settings → Networking → Generate Domain)
-3. Note the domain URL
+Add a **volume** mounted at `/data` in Railway (Settings > Volumes) for SQLite persistence.
 
-### 2. Register Users
+### 2. Configure
 
 ```bash
-# Point setup at your Railway Synapse — it registers users and writes .env
-./scripts/setup.sh https://your-railway-domain.up.railway.app
+# Back in project root
+cp .env.example .env
+# Edit .env with your Railway relay URL and auth token
 ```
 
-### 3. Configure
-
-```bash
-# Add your Anthropic API key
-vim .env  # set ANTHROPIC_API_KEY=sk-ant-...
-
-# Configure your agents
-vim bot/config/agents.json
-```
-
-Example `agents.json`:
+Configure your agents in `bot/config/agents.json`:
 ```json
 {
   "agents": [
@@ -74,7 +70,7 @@ Example `agents.json`:
 }
 ```
 
-### 4. Start the Bot
+### 3. Start the Bot
 
 ```bash
 cd bot
@@ -82,59 +78,58 @@ npm install
 npm run dev
 ```
 
-### 5. Connect Element
+### 4. Install the Android App
 
-Open Element (phone or desktop) and connect to your homeserver:
-- **Homeserver URL:** your Railway domain (e.g., `https://claudebridge-production-xxxx.up.railway.app`)
-- **Username / Password:** shown in setup output
+Build the APK:
+```bash
+cd android
+./gradlew assembleDebug
+# APK at: app/build/outputs/apk/debug/app-debug.apk
+```
 
-You'll see rooms created automatically — one per agent plus "Claude Ops".
+Transfer to your phone and sideload. Open the app, go to Settings, enter:
+- **Relay URL**: your Railway domain (e.g., `https://claudebridge-production.up.railway.app`)
+- **Auth Token**: the token you generated above
+
+Hit Connect. You'll see agent channels appear as the bot registers them.
 
 ## Usage
 
-### Ops Room Commands
-
-| Command | Description |
-|---------|-------------|
-| `!start <agent-id>` | Start an agent session |
-| `!stop <agent-id>` | Stop an agent session |
-| `!restart <agent-id>` | Clear session and stop |
-| `!status [agent-id]` | Show status |
-| `!agents` | List all configured agents |
-| `!cost [agent-id]` | Show cost breakdown |
-| `!approve-all` | Approve all pending permissions |
-
-### In Agent Rooms
-
-Type a message to send it to Claude as a prompt. When Claude needs permission:
-
-- Reply **y** to approve
-- Reply **n** to deny
-- Reply with text to deny with a reason
-
-## Local Development
-
-For testing without Railway, use the included Docker Compose:
-
-```bash
-./scripts/setup.sh --local
-cd bot && npm run dev
-```
-
-This starts Synapse locally on `localhost:8008`.
+From the Android app:
+- Tap a channel to see agent messages
+- When Claude needs a tool permission, tap **Approve** or **Deny**
+- Type a message to send it to the agent as input
 
 ## Architecture
 
 ```
+relay/src/
+├── index.ts         — WebSocket server + HTTP health endpoint
+├── protocol.ts      — Shared JSON-over-WebSocket protocol types
+└── store.ts         — SQLite message persistence
+
 bot/src/
-├── index.ts            — Entry point
-├── config.ts           — Configuration loading
-├── constants.ts        — All magic values
-├── matrix-client.ts    — Matrix connection + room management
-├── agent-manager.ts    — Agent lifecycle + message routing
-├── agent-session.ts    — Single SDK session wrapper
-├── formatter.ts        — Matrix message formatting
-└── commands.ts         — Ops room command parsing
+├── index.ts         — Entry point
+├── config.ts        — Configuration loading
+├── constants.ts     — All magic values
+├── relay-client.ts  — WebSocket client with auto-reconnect
+├── agent-manager.ts — Agent lifecycle + message routing
+└── agent-session.ts — Single SDK session wrapper
+
+android/app/src/main/java/com/claudebridge/
+├── ClaudeBridgeApp.kt            — Application class, notification channels
+├── MainActivity.kt               — Compose navigation host
+├── data/
+│   ├── Models.kt                 — Channel, ChatMessage data classes
+│   ├── RelayClient.kt            — OkHttp WebSocket client
+│   ├── BridgeState.kt            — Reactive state holder (StateFlow)
+│   └── Preferences.kt            — SharedPreferences wrapper
+├── service/
+│   └── RelayService.kt           — Foreground service, notifications
+└── ui/
+    ├── theme/                    — Material 3 dark theme
+    ├── viewmodel/ChatViewModel.kt — UI state management
+    └── screen/                   — Compose screens (channels, chat, settings)
 ```
 
 ## License

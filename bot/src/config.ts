@@ -22,11 +22,8 @@ export interface AgentConfig {
 // --- Environment Config ---
 
 export interface EnvConfig {
-  matrixHomeserverUrl: string;
-  matrixBotUser: string;
-  matrixBotAccessToken: string;
-  matrixAdminUser: string;
-  anthropicApiKey: string;
+  relayUrl: string;
+  relayAuthToken: string;
   claudeModel: string;
 }
 
@@ -40,11 +37,8 @@ function requireEnv(key: string): string {
 
 export function loadEnvConfig(): EnvConfig {
   return {
-    matrixHomeserverUrl: requireEnv("MATRIX_HOMESERVER_URL"),
-    matrixBotUser: requireEnv("MATRIX_BOT_USER"),
-    matrixBotAccessToken: requireEnv("MATRIX_BOT_ACCESS_TOKEN"),
-    matrixAdminUser: requireEnv("MATRIX_ADMIN_USER"),
-    anthropicApiKey: requireEnv("ANTHROPIC_API_KEY"),
+    relayUrl: requireEnv("RELAY_URL"),
+    relayAuthToken: requireEnv("RELAY_AUTH_TOKEN"),
     claudeModel: process.env.CLAUDE_MODEL || DEFAULT_MODEL,
   };
 }

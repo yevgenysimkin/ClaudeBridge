@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Amber bridge icon on transparent background -->
+    <path
+        android:fillColor="#D97706"
+        android:pathData="M30,44h12v4H30V44zM66,44h12v4H66V44zM42,45h24v4H42V45zM36,52c-3.3,0 -6,2.7 -6,6s2.7,6 6,6 6,-2.7 6,-6 -2.7,-6 -6,-6zM72,52c-3.3,0 -6,2.7 -6,6s2.7,6 6,6 6,-2.7 6,-6 -2.7,-6 -6,-6zM45,55h18v4H45V55z"/>
+</vector>

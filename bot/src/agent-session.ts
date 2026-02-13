@@ -51,7 +51,7 @@ export interface SessionEvents {
  * Wraps a single Claude Agent SDK session.
  *
  * Manages the SDK query lifecycle, permission callbacks, and
- * emits typed events for the manager to route to Matrix.
+ * emits typed events for the manager to route to the relay.
  */
 export class AgentSession extends EventEmitter<SessionEvents> {
   readonly agentId: string;
@@ -248,7 +248,7 @@ export class AgentSession extends EventEmitter<SessionEvents> {
         }
       }, toolName });
 
-      // Emit event for the manager to post to Matrix
+      // Emit event for the manager to post to the relay
       this.emit("permission-request", { toolName, input });
 
       // Timeout: auto-deny after PERMISSION_TIMEOUT_MS
@@ -264,7 +264,7 @@ export class AgentSession extends EventEmitter<SessionEvents> {
     });
   }
 
-  /** Handle AskUserQuestion: post question to Matrix, wait for answer. */
+  /** Handle AskUserQuestion: post question to relay, wait for answer. */
   private handleUserQuestion(
     input: Record<string, unknown>,
   ): Promise<{ behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }> {

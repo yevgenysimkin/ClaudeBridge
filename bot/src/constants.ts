@@ -3,12 +3,12 @@
  * Change it once, it changes everywhere. 🍩
  */
 
-// --- Matrix Room Naming ---
+// --- Relay Channel Naming ---
 export const ROOM_PREFIX = "claude";
 export const OPS_ROOM_ALIAS = `${ROOM_PREFIX}-ops`;
 export const AGENT_ROOM_ALIAS_PREFIX = `${ROOM_PREFIX}-agent-`;
 
-// --- Matrix Room Display ---
+// --- Relay Channel Display ---
 export const OPS_ROOM_NAME = "Claude Ops";
 export const AGENT_ROOM_NAME_PREFIX = "Agent: ";
 
@@ -24,7 +24,7 @@ export const DEFAULT_MAX_BUDGET_USD = 5.0;
 
 // --- Timeouts (ms) ---
 export const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes to respond to a permission prompt
-export const MATRIX_SYNC_INTERVAL_MS = 3_000;
+export const RELAY_RECONNECT_BASE_MS = 3_000;
 export const AGENT_STARTUP_DELAY_MS = 1_000;
 
 // --- Permission Prompt Formatting ---

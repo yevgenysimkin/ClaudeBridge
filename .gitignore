@@ -6,16 +6,14 @@ node_modules/
 
 # Build output
 bot/dist/
+relay/dist/
 
-# Synapse data (managed by Docker/Railway volumes)
-synapse/data/
-synapse/*.db
-synapse/*.log
-synapse/signing.key
-synapse/media_store/
-
-# Matrix bot storage
-.matrix-storage/
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
 
 # IDE
 .idea/

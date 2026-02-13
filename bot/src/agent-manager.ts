@@ -1,105 +1,73 @@
-import { AgentSession, type PermissionResolveResult } from "./agent-session.js";
-import { BridgeMatrixClient } from "./matrix-client.js";
+import { AgentSession } from "./agent-session.js";
+import { RelayClient } from "./relay-client.js";
 import { AgentConfig, EnvConfig } from "./config.js";
-import {
-  formatPermissionRequest,
-  formatUserQuestion,
-  formatPermissionApproved,
-  formatPermissionDenied,
-  formatToolUse,
-  formatAssistantText,
-  formatResult,
-  formatStatus,
-} from "./formatter.js";
 
 /**
- * Manages all agent sessions and routes messages between Matrix and the SDK.
- *
- * Responsibilities:
- * - Lifecycle: start/stop/restart agents
- * - Wires agent events → Matrix room messages
- * - Routes Matrix room messages → correct agent session
- * - Handles permission approval/denial flow
+ * Manages all agent sessions and routes messages between the relay and the SDK.
  */
 export class AgentManager {
   private sessions = new Map<string, AgentSession>();
   private agentConfigs = new Map<string, AgentConfig>();
-  private agentRoomIds = new Map<string, string>(); // agentId → roomId
-  private roomToAgent = new Map<string, string>();   // roomId → agentId
-  private matrix: BridgeMatrixClient;
+  private relay: RelayClient;
   private envConfig: EnvConfig;
-  private opsRoomId: string | undefined;
 
-  constructor(matrix: BridgeMatrixClient, envConfig: EnvConfig) {
-    this.matrix = matrix;
+  constructor(relay: RelayClient, envConfig: EnvConfig) {
+    this.relay = relay;
     this.envConfig = envConfig;
   }
 
-  /** Initialize: create rooms, register configs, set up routing. */
+  /** Initialize: register channels with relay, set up routing. */
   async initialize(configs: AgentConfig[]): Promise<void> {
-    // Store configs
     for (const config of configs) {
       this.agentConfigs.set(config.id, config);
     }
 
-    // Create ops room
-    this.opsRoomId = await this.matrix.ensureOpsRoom();
-    await this.matrix.sendNotice(this.opsRoomId, `ClaudeBridge online. ${configs.length} agent(s) configured.`);
-
-    // Create agent rooms
+    // Register channels with the relay
+    this.relay.registerChannel("ops", "Ops", "idle");
     for (const config of configs) {
-      const roomId = await this.matrix.ensureAgentRoom(config.id, config.name);
-      this.agentRoomIds.set(config.id, roomId);
-      this.roomToAgent.set(roomId, config.id);
+      this.relay.registerChannel(config.id, config.name, "idle");
     }
 
-    // Auto-start agents that have autoStart enabled
-    for (const config of configs) {
-      if (config.autoStart) {
-        await this.matrix.sendNotice(
-          this.agentRoomIds.get(config.id)!,
-          `Agent ${config.name} is configured for auto-start. Send a message to begin.`,
-        );
-      }
-    }
+    this.relay.sendBotMessage("ops", `ClaudeBridge online. ${configs.length} agent(s) configured.`);
   }
 
-  /**
-   * Handle an incoming Matrix message from any room.
-   * Routes to the appropriate handler based on room.
-   */
-  async handleMessage(roomId: string, sender: string, body: string): Promise<void> {
-    // Only respond to the admin user
-    if (sender !== this.envConfig.matrixAdminUser) return;
+  /** Handle an incoming message from the relay. */
+  async handleRelayMessage(msg: Record<string, unknown>): Promise<void> {
+    // Only handle messages from users (sent via the app)
+    if (msg.type === "message") {
+      const channel = msg.channel as string;
+      const sender = msg.sender as string;
+      const content = msg.content as string;
 
-    const agentId = this.roomToAgent.get(roomId);
+      if (sender !== "user") return;
+      if (!content) return;
 
-    if (agentId) {
-      await this.handleAgentRoomMessage(agentId, body);
-    } else if (roomId === this.opsRoomId) {
-      await this.handleOpsRoomMessage(body);
+      if (channel === "ops") {
+        await this.handleOpsMessage(content);
+      } else if (this.agentConfigs.has(channel)) {
+        await this.handleAgentMessage(channel, content);
+      }
     }
-    // Ignore messages in unknown rooms
   }
 
   /** Start an agent session. */
   async startAgent(agentId: string): Promise<boolean> {
     const config = this.agentConfigs.get(agentId);
     if (!config) {
-      await this.notifyOps(`Unknown agent: ${agentId}`);
+      this.relay.sendBotMessage("ops", `Unknown agent: ${agentId}`);
       return false;
     }
 
     if (this.sessions.has(agentId) && this.sessions.get(agentId)!.isRunning) {
-      await this.notifyOps(`Agent ${config.name} is already running.`);
+      this.relay.sendBotMessage("ops", `Agent ${config.name} is already running.`);
       return false;
     }
 
     const session = new AgentSession(config);
     this.sessions.set(agentId, session);
     this.wireSessionEvents(agentId, session);
-
-    await this.notifyOps(`Agent ${config.name} started.`);
+    this.relay.registerChannel(agentId, config.name, "idle");
+    this.relay.sendBotMessage("ops", `Agent ${config.name} ready. Send a message in its channel to begin.`);
     return true;
   }
 
@@ -107,97 +75,89 @@ export class AgentManager {
   async stopAgent(agentId: string): Promise<boolean> {
     const session = this.sessions.get(agentId);
     if (!session) {
-      await this.notifyOps(`No active session for agent: ${agentId}`);
+      this.relay.sendBotMessage("ops", `No active session for agent: ${agentId}`);
       return false;
     }
-
     session.stop();
-    const config = this.agentConfigs.get(agentId);
-    await this.notifyOps(`Agent ${config?.name || agentId} stopped.`);
+    this.relay.registerChannel(agentId, this.agentConfigs.get(agentId)?.name || agentId, "stopped");
+    this.relay.sendBotMessage("ops", `Agent ${agentId} stopped.`);
     return true;
   }
 
-  /** Restart an agent session (stop + clear + notify). */
+  /** Restart an agent session. */
   async restartAgent(agentId: string): Promise<boolean> {
     const session = this.sessions.get(agentId);
     if (session) {
       session.reset();
       this.sessions.delete(agentId);
     }
-
     const config = this.agentConfigs.get(agentId);
     if (!config) {
-      await this.notifyOps(`Unknown agent: ${agentId}`);
+      this.relay.sendBotMessage("ops", `Unknown agent: ${agentId}`);
       return false;
     }
-
-    await this.notifyOps(`Agent ${config.name} restarted. Send a message to begin a new session.`);
+    this.relay.registerChannel(agentId, config.name, "idle");
+    this.relay.sendBotMessage("ops", `Agent ${config.name} restarted.`);
     return true;
   }
 
-  /** Get status of one or all agents. */
-  async reportStatus(agentId?: string): Promise<void> {
-    if (agentId) {
-      const session = this.sessions.get(agentId);
-      const config = this.agentConfigs.get(agentId);
-      if (!config) {
-        await this.notifyOps(`Unknown agent: ${agentId}`);
-        return;
-      }
-
-      const status = session
-        ? session.getStatus()
-        : { id: agentId, name: config.name, running: false, totalCostUsd: 0, totalTurns: 0, pendingPermissions: 0 };
-
-      const formatted = formatStatus(status);
-      await this.matrix.sendHtml(this.opsRoomId!, formatted.body, formatted.html);
-    } else {
-      // Report all agents
-      for (const [id, config] of this.agentConfigs) {
-        const session = this.sessions.get(id);
-        const status = session
-          ? session.getStatus()
-          : { id, name: config.name, running: false, totalCostUsd: 0, totalTurns: 0, pendingPermissions: 0 };
-
-        const formatted = formatStatus(status);
-        await this.matrix.sendHtml(this.opsRoomId!, formatted.body, formatted.html);
-      }
-    }
-  }
-
-  /** List all configured agents. */
-  async listAgents(): Promise<void> {
+  /** List all agents. */
+  listAgents(): void {
     const lines: string[] = ["Configured agents:"];
     for (const [id, config] of this.agentConfigs) {
       const session = this.sessions.get(id);
       const state = session?.isRunning ? "🟢" : "⚫";
       lines.push(`  ${state} ${config.name} (${id}) — ${config.cwd}`);
     }
-    await this.matrix.sendText(this.opsRoomId!, lines.join("\n"));
+    this.relay.sendBotMessage("ops", lines.join("\n"));
   }
 
-  /** Report cost for one or all agents. */
-  async reportCost(agentId?: string): Promise<void> {
+  /** Report status. */
+  reportStatus(agentId?: string): void {
     if (agentId) {
       const session = this.sessions.get(agentId);
-      const cost = session?.cost ?? 0;
-      await this.matrix.sendText(this.opsRoomId!, `💰 ${agentId}: $${cost.toFixed(4)}`);
+      const config = this.agentConfigs.get(agentId);
+      if (!config) {
+        this.relay.sendBotMessage("ops", `Unknown agent: ${agentId}`);
+        return;
+      }
+      const status = session?.getStatus() || {
+        id: agentId, name: config.name, running: false,
+        totalCostUsd: 0, totalTurns: 0, pendingPermissions: 0,
+      };
+      this.relay.sendBotMessage("ops", formatStatus(status));
+    } else {
+      for (const [id, config] of this.agentConfigs) {
+        const session = this.sessions.get(id);
+        const status = session?.getStatus() || {
+          id, name: config.name, running: false,
+          totalCostUsd: 0, totalTurns: 0, pendingPermissions: 0,
+        };
+        this.relay.sendBotMessage("ops", formatStatus(status));
+      }
+    }
+  }
+
+  /** Report cost. */
+  reportCost(agentId?: string): void {
+    if (agentId) {
+      const cost = this.sessions.get(agentId)?.cost ?? 0;
+      this.relay.sendBotMessage("ops", `💰 ${agentId}: $${cost.toFixed(4)}`);
     } else {
       let total = 0;
       const lines: string[] = ["Cost breakdown:"];
       for (const [id] of this.agentConfigs) {
-        const session = this.sessions.get(id);
-        const cost = session?.cost ?? 0;
+        const cost = this.sessions.get(id)?.cost ?? 0;
         total += cost;
         lines.push(`  ${id}: $${cost.toFixed(4)}`);
       }
       lines.push(`  Total: $${total.toFixed(4)}`);
-      await this.matrix.sendText(this.opsRoomId!, lines.join("\n"));
+      this.relay.sendBotMessage("ops", lines.join("\n"));
     }
   }
 
-  /** Approve all pending permissions across all agents. */
-  async approveAll(): Promise<void> {
+  /** Approve all pending permissions. */
+  approveAll(): void {
     let count = 0;
     for (const [, session] of this.sessions) {
       while (session.hasPendingPermission) {
@@ -205,153 +165,174 @@ export class AgentManager {
         count++;
       }
     }
-    await this.notifyOps(`Approved ${count} pending permission(s).`);
+    this.relay.sendBotMessage("ops", `Approved ${count} pending permission(s).`);
   }
 
-  // --- Private: Message Routing ---
+  // --- Private ---
 
-  /** Handle a message in an agent's room. */
-  private async handleAgentRoomMessage(agentId: string, body: string): Promise<void> {
+  private async handleAgentMessage(agentId: string, body: string): Promise<void> {
     const session = this.sessions.get(agentId);
 
     // Check if this is a permission response
     if (session?.hasPendingPermission) {
-      const lowerBody = body.trim().toLowerCase();
-
-      if (lowerBody === "y" || lowerBody === "yes") {
-        const toolName = session.latestPendingToolName || "unknown";
+      const lower = body.trim().toLowerCase();
+      if (lower === "y" || lower === "yes") {
         session.resolveLatestPermission({ approved: true });
-        const formatted = formatPermissionApproved(toolName);
-        await this.sendToAgentRoom(agentId, formatted.body, formatted.html);
         return;
       }
-
-      if (lowerBody === "n" || lowerBody === "no") {
-        const toolName = session.latestPendingToolName || "unknown";
+      if (lower === "n" || lower === "no") {
         session.resolveLatestPermission({ approved: false });
-        const formatted = formatPermissionDenied(toolName);
-        await this.sendToAgentRoom(agentId, formatted.body, formatted.html);
         return;
       }
-
-      // Any other text: could be an answer to AskUserQuestion, or a denial with reason
+      // Could be an answer to AskUserQuestion
       if (session.latestPendingToolName === "AskUserQuestion") {
         session.resolveLatestPermission({ approved: true, answer: body.trim() });
         return;
       }
-
       // Treat as denial with reason
-      const toolName = session.latestPendingToolName || "unknown";
       session.resolveLatestPermission({ approved: false, message: body.trim() });
-      const formatted = formatPermissionDenied(toolName, body.trim());
-      await this.sendToAgentRoom(agentId, formatted.body, formatted.html);
       return;
     }
 
-    // Not a permission response — it's a new message for the agent
-    const config = this.agentConfigs.get(agentId);
-    if (!config) return;
-
-    // Ensure session exists
+    // New message for the agent
     if (!session) {
       await this.startAgent(agentId);
     }
 
     const activeSession = this.sessions.get(agentId)!;
-
-    // If session is already running (processing a previous query), queue this
     if (activeSession.isRunning) {
-      await this.sendToAgentRoom(agentId,
-        "⏳ Agent is busy processing. Message queued — it will be sent when the current task completes.",
-        "<i>⏳ Agent is busy processing. Message queued — it will be sent when the current task completes.</i>",
-      );
-      // TODO: implement proper message queuing
+      this.relay.sendBotMessage(agentId, "⏳ Agent is busy. Message will be sent when current task completes.");
       return;
     }
 
-    // Send the message to the agent
+    this.relay.registerChannel(agentId, this.agentConfigs.get(agentId)?.name || agentId, "running");
     activeSession.sendMessage(body, this.envConfig.claudeModel);
   }
 
-  /** Handle a message in the ops room. */
-  private async handleOpsRoomMessage(body: string): Promise<void> {
-    // Ops room messages are handled by the command parser in index.ts
-    // This is a fallback for non-command messages
+  private async handleOpsMessage(body: string): Promise<void> {
     if (!body.startsWith("!")) {
-      await this.matrix.sendText(this.opsRoomId!, "Use !help for available commands.");
+      this.relay.sendBotMessage("ops", "Use !help for available commands.");
+      return;
+    }
+
+    const parts = body.slice(1).split(/\s+/);
+    const cmd = parts[0]?.toLowerCase();
+    const arg = parts[1];
+
+    switch (cmd) {
+      case "start": arg ? this.startAgent(arg) : this.relay.sendBotMessage("ops", "Usage: !start <agent-id>"); break;
+      case "stop": arg ? this.stopAgent(arg) : this.relay.sendBotMessage("ops", "Usage: !stop <agent-id>"); break;
+      case "restart": arg ? this.restartAgent(arg) : this.relay.sendBotMessage("ops", "Usage: !restart <agent-id>"); break;
+      case "status": this.reportStatus(arg); break;
+      case "agents": this.listAgents(); break;
+      case "cost": this.reportCost(arg); break;
+      case "approve-all": this.approveAll(); break;
+      case "help": this.relay.sendBotMessage("ops", HELP_TEXT); break;
+      default: this.relay.sendBotMessage("ops", `Unknown command: !${cmd}`); break;
     }
   }
 
-  // --- Private: Event Wiring ---
-
-  /** Wire an agent session's events to Matrix rooms. */
   private wireSessionEvents(agentId: string, session: AgentSession): void {
     session.on("started", ({ sessionId }) => {
-      this.sendToAgentRoom(agentId,
-        `Session started: ${sessionId}`,
-        `<i>Session started: <code>${sessionId}</code></i>`,
-      );
+      this.relay.sendBotMessage(agentId, `Session started: ${sessionId}`);
     });
 
     session.on("text", ({ text }) => {
-      const formatted = formatAssistantText(text);
-      this.sendToAgentRoom(agentId, formatted.body, formatted.html);
+      this.relay.sendBotMessage(agentId, text);
     });
 
     session.on("tool-use", ({ toolName, input }) => {
-      const formatted = formatToolUse(toolName, input);
-      this.sendToAgentRoomNotice(agentId, formatted.body, formatted.html);
+      const summary = summarizeToolInput(toolName, input);
+      this.relay.sendBotMessage(agentId, `🔧 ${toolName}\n${summary}`, {
+        toolUse: { toolName, summary },
+      });
     });
 
     session.on("permission-request", ({ toolName, input }) => {
-      const formatted = formatPermissionRequest(toolName, input);
-      this.sendToAgentRoom(agentId, formatted.body, formatted.html);
+      const summary = summarizeToolInput(toolName, input);
+      this.relay.sendBotMessage(agentId,
+        `🔒 PERMISSION REQUEST\nTool: ${toolName}\n${summary}\n\nReply: y to approve, n to deny`,
+        {
+          permissionRequest: { requestId: "", toolName, toolInput: input },
+          needsAttention: true,
+        },
+      );
     });
 
     session.on("user-question", ({ questions }) => {
-      const formatted = formatUserQuestion(questions);
-      this.sendToAgentRoom(agentId, formatted.body, formatted.html);
+      let text = "❓ AGENT QUESTION\n";
+      for (const q of questions) {
+        text += `\n${q.question}\n`;
+        for (let i = 0; i < q.options.length; i++) {
+          const opt = q.options[i];
+          text += `  ${i + 1}. ${opt.label}${opt.description ? ` — ${opt.description}` : ""}\n`;
+        }
+      }
+      text += "\nReply with your choice.";
+      this.relay.sendBotMessage(agentId, text, {
+        userQuestion: { requestId: "", questions },
+        needsAttention: true,
+      });
     });
 
     session.on("result", (result) => {
-      const formatted = formatResult(result);
-      this.sendToAgentRoom(agentId, formatted.body, formatted.html);
+      const status = result.success ? "✅ Completed" : "💥 Failed";
+      let text = status;
+      if (result.costUsd !== undefined) text += ` | 💰 $${result.costUsd.toFixed(4)}`;
+      if (result.numTurns !== undefined) text += ` | ${result.numTurns} turns`;
+      if (result.durationMs !== undefined) text += ` | ${(result.durationMs / 1000).toFixed(1)}s`;
+      if (result.text) text += `\n\n${result.text}`;
+      if (result.errors?.length) text += `\n\nErrors:\n${result.errors.join("\n")}`;
+
+      this.relay.sendBotMessage(agentId, text, {
+        result: {
+          success: result.success,
+          costUsd: result.costUsd,
+          durationMs: result.durationMs,
+          numTurns: result.numTurns,
+        },
+      });
+      this.relay.registerChannel(agentId, this.agentConfigs.get(agentId)?.name || agentId, "idle");
     });
 
     session.on("error", (err) => {
-      this.sendToAgentRoom(agentId,
-        `💥 Error: ${err.message}`,
-        `<b>💥 Error:</b> <pre>${err.message}</pre>`,
-      );
+      this.relay.sendBotMessage(agentId, `💥 Error: ${err.message}`);
+      this.relay.registerChannel(agentId, this.agentConfigs.get(agentId)?.name || agentId, "idle");
     });
 
     session.on("stopped", () => {
-      this.sendToAgentRoomNotice(agentId,
-        "Session stopped.",
-        "<i>Session stopped.</i>",
-      );
+      this.relay.sendBotMessage(agentId, "Session stopped.");
+      this.relay.registerChannel(agentId, this.agentConfigs.get(agentId)?.name || agentId, "stopped");
     });
   }
-
-  // --- Private: Helpers ---
-
-  private async sendToAgentRoom(agentId: string, body: string, html: string): Promise<void> {
-    const roomId = this.agentRoomIds.get(agentId);
-    if (roomId) {
-      await this.matrix.sendHtml(roomId, body, html);
-    }
-  }
-
-  private async sendToAgentRoomNotice(agentId: string, body: string, html: string): Promise<void> {
-    const roomId = this.agentRoomIds.get(agentId);
-    if (roomId) {
-      await this.matrix.sendHtmlNotice(roomId, body, html);
-    }
-  }
-
-  private async notifyOps(text: string): Promise<void> {
-    if (this.opsRoomId) {
-      await this.matrix.sendText(this.opsRoomId, text);
-    }
-  }
 }
+
+// --- Helpers ---
+
+function formatStatus(s: { id: string; name: string; running: boolean; totalCostUsd: number; totalTurns: number }): string {
+  const state = s.running ? "🟢 Running" : "⚫ Stopped";
+  return `📊 ${s.name} (${s.id})\nStatus: ${state}\n💰 Cost: $${s.totalCostUsd.toFixed(4)} | Turns: ${s.totalTurns}`;
+}
+
+function summarizeToolInput(toolName: string, input: Record<string, unknown>): string {
+  const lower = toolName.toLowerCase();
+  if (lower.includes("bash") && input.command) return `$ ${input.command}`;
+  if ((lower.includes("edit") || lower.includes("write") || lower.includes("read")) && input.file_path) return `File: ${input.file_path}`;
+  if (lower.includes("glob") && input.pattern) return `Pattern: ${input.pattern}`;
+  if (lower.includes("grep") && input.pattern) return `Pattern: ${input.pattern}${input.path ? ` in ${input.path}` : ""}`;
+  const entries = Object.entries(input).slice(0, 3);
+  return entries.map(([k, v]) => {
+    const val = typeof v === "string" ? v : JSON.stringify(v);
+    return `${k}: ${val.length > 200 ? val.slice(0, 200) + "..." : val}`;
+  }).join("\n");
+}
+
+const HELP_TEXT = `ClaudeBridge Commands:
+!start <agent-id>    — Start an agent session
+!stop <agent-id>     — Stop an agent session
+!restart <agent-id>  — Restart (clear session + stop)
+!status [agent-id]   — Show status
+!agents              — List all configured agents
+!cost [agent-id]     — Show cost breakdown
+!approve-all         — Approve all pending permissions
+!help                — Show this help`;
