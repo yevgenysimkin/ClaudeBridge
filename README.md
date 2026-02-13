@@ -88,7 +88,7 @@ cd android
 ```
 
 Transfer to your phone and sideload. Open the app, go to Settings, enter:
-- **Relay URL**: your Railway domain (e.g., `https://claudebridge-production.up.railway.app`)
+- **Relay URL**: your Railway domain (e.g., `https://cb.pinewell.xyz`)
 - **Auth Token**: the token you generated above
 
 Hit Connect. You'll see agent channels appear as the bot registers them.
