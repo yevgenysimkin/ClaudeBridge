@@ -1,15 +1,9 @@
 {
   "agents": [
     {
-      "id": "example",
-      "name": "Example Agent",
-      "cwd": "/Users/yevgenysimkin/AfM/ClaudeBridge",
-      "model": "claude-sonnet-4-5-20250929",
-      "maxTurns": 50,
-      "maxBudgetUsd": 5.0,
-      "permissionMode": "default",
-      "autoStart": false,
-      "systemPrompt": "You are a helpful coding assistant."
+      "id": "claudebridge",
+      "name": "ClaudeBridge Dev",
+      "cwd": "/Users/yevgenysimkin/AfM/ClaudeBridge"
     }
   ]
 }

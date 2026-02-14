@@ -1,22 +1,15 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MODEL, DEFAULT_MAX_TURNS, DEFAULT_MAX_BUDGET_USD } from "./constants.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// --- Agent Configuration ---
+// --- Agent / Channel Configuration ---
 
 export interface AgentConfig {
   id: string;
   name: string;
   cwd: string;
-  model?: string;
-  maxTurns?: number;
-  maxBudgetUsd?: number;
-  systemPrompt?: string;
-  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan";
-  autoStart?: boolean;
 }
 
 // --- Environment Config ---
@@ -24,7 +17,6 @@ export interface AgentConfig {
 export interface EnvConfig {
   relayUrl: string;
   relayAuthToken: string;
-  claudeModel: string;
 }
 
 function requireEnv(key: string): string {
@@ -39,7 +31,6 @@ export function loadEnvConfig(): EnvConfig {
   return {
     relayUrl: requireEnv("RELAY_URL"),
     relayAuthToken: requireEnv("RELAY_AUTH_TOKEN"),
-    claudeModel: process.env.CLAUDE_MODEL || DEFAULT_MODEL,
   };
 }
 
@@ -65,12 +56,6 @@ export function loadAgentConfigs(): AgentConfig[] {
       id: a.id,
       name: (a.name as string) || a.id,
       cwd: a.cwd as string,
-      model: (a.model as string) || undefined,
-      maxTurns: (a.maxTurns as number) || DEFAULT_MAX_TURNS,
-      maxBudgetUsd: (a.maxBudgetUsd as number) || DEFAULT_MAX_BUDGET_USD,
-      systemPrompt: (a.systemPrompt as string) || undefined,
-      permissionMode: (a.permissionMode as AgentConfig["permissionMode"]) || "default",
-      autoStart: Boolean(a.autoStart),
     };
   });
 }

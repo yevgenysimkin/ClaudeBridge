@@ -1,7 +1,7 @@
 {
-  "name": "claudebridge-bot",
-  "version": "0.2.0",
-  "description": "Bridge bot connecting Claude Agent SDK sessions to ClaudeBridge relay",
+  "name": "claudebridge-watcher",
+  "version": "0.3.0",
+  "description": "Lightweight bridge watcher: relays prompts and permissions between Claude Code sessions and phone",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -11,7 +11,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.39",
     "dotenv": "^16.4.7",
     "ws": "^8.18.0"
   },

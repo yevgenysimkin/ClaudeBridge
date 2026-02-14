@@ -25,6 +25,9 @@ android/local.properties
 .DS_Store
 Thumbs.db
 
+# Bridge prompt files
+.claude-bridge-prompt
+
 # Logs
 *.log
 logs/
