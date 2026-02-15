@@ -61,6 +61,16 @@ async function main(): Promise<void> {
     if (type === "mode_changed" && typeof msg.mode === "string") {
       cachedMode = msg.mode as "phone" | "desktop";
       console.log(`[watcher] Mode changed: ${cachedMode}`);
+
+      // When switching back to desktop, unblock all pending permission requests
+      // so hooks fall through to normal terminal prompts instead of hanging forever
+      if (cachedMode === "desktop" && pendingPermissions.size > 0) {
+        console.log(`[watcher] Desktop mode — releasing ${pendingPermissions.size} pending permission(s).`);
+        for (const [reqId, pending] of pendingPermissions) {
+          pending.resolve({ approved: false, message: "Mode switched to desktop" });
+          pendingPermissions.delete(reqId);
+        }
+      }
     }
 
     if (type === "message" && msg.sender === "user") {
