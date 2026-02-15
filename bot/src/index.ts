@@ -70,26 +70,23 @@ async function main(): Promise<void> {
 
       if (!session) return;
 
-      // Check if this is a permission response (y/n/yes/no)
-      let handledAsPermission = false;
+      // Check if this is an explicit permission response (y/n only)
       const contentLower = content.toLowerCase();
+      let handledAsPermission = false;
 
-      for (const [reqId, pending] of pendingPermissions) {
-        if (pending.sessionId === channelId) {
-          if (contentLower === "y" || contentLower === "yes") {
-            pending.resolve({ approved: true });
-          } else if (contentLower === "n" || contentLower === "no") {
-            pending.resolve({ approved: false });
-          } else {
-            pending.resolve({ approved: false, message: content });
+      if (contentLower === "y" || contentLower === "yes" || contentLower === "n" || contentLower === "no") {
+        for (const [reqId, pending] of pendingPermissions) {
+          if (pending.sessionId === channelId) {
+            const approved = contentLower === "y" || contentLower === "yes";
+            pending.resolve({ approved });
+            pendingPermissions.delete(reqId);
+            handledAsPermission = true;
+            break;
           }
-          pendingPermissions.delete(reqId);
-          handledAsPermission = true;
-          break;
         }
       }
 
-      // If not a permission response, write as a prompt
+      // Any non-y/n message is always a regular prompt, even if permissions are pending
       if (!handledAsPermission) {
         writePromptFile(session.sessionId, content);
         console.log(`[watcher] Wrote prompt for session ${session.sessionId}`);
@@ -154,8 +151,13 @@ function writePromptFile(sessionId: string, content: string): void {
  * Derive a friendly display name from a cwd path.
  * e.g. "/Users/yevgenysimkin/AfM/ClaudeBridge" → "ClaudeBridge"
  */
+const GENERIC_DIRS = new Set(["src", "bot", "app", "lib", "dist", "build", "test", "tests", "scripts", "config", "res", "main"]);
+
 function deriveSessionName(cwd: string, sessionId: string): string {
-  const dir = basename(cwd);
+  let dir = basename(cwd);
+  if (GENERIC_DIRS.has(dir)) {
+    dir = basename(dirname(cwd));
+  }
   const shortId = sessionId.slice(0, 8);
   return dir ? `${dir} (${shortId})` : shortId;
 }
@@ -195,7 +197,15 @@ function startHookServer(relay: RelayClient): void {
           const existing = sessions.get(sessionId);
           if (existing) {
             existing.lastSeen = Date.now();
-            existing.cwd = cwd || existing.cwd;
+            if (cwd && cwd !== existing.cwd) {
+              existing.cwd = cwd;
+              const newName = deriveSessionName(cwd, sessionId);
+              if (newName !== existing.name) {
+                existing.name = newName;
+                relay.registerChannel(sessionId, newName, "running");
+                console.log(`[watcher] Session renamed: ${sessionId} → ${newName}`);
+              }
+            }
           } else {
             const name = deriveSessionName(cwd || "", sessionId);
             const session: Session = {
@@ -334,30 +344,40 @@ function startHookServer(relay: RelayClient): void {
 }
 
 /**
- * Remove session directories older than 24 hours.
+ * Clear all registration markers on startup (watcher restart = sessions must re-register).
+ * Also remove session directories older than 24 hours entirely.
  */
 function cleanupStaleSessions(): void {
   if (!existsSync(BRIDGE_DIR)) return;
   const now = Date.now();
-  let cleaned = 0;
+  let cleared = 0;
+  let removed = 0;
 
   for (const entry of readdirSync(BRIDGE_DIR)) {
-    // Skip non-directory entries and the "disabled" kill-switch file
     const entryPath = resolve(BRIDGE_DIR, entry);
     try {
       const stat = statSync(entryPath);
       if (!stat.isDirectory()) continue;
+
       if (now - stat.mtimeMs > SESSION_MAX_AGE_MS) {
+        // Old session — remove entirely
         rmSync(entryPath, { recursive: true, force: true });
-        cleaned++;
+        removed++;
+      } else {
+        // Fresh session — just clear the registration marker so hooks re-register
+        const markerPath = resolve(entryPath, "registered");
+        if (existsSync(markerPath)) {
+          rmSync(markerPath);
+          cleared++;
+        }
       }
     } catch {
       // Ignore errors on individual entries
     }
   }
 
-  if (cleaned > 0) {
-    console.log(`[watcher] Cleaned up ${cleaned} stale session(s).`);
+  if (cleared > 0 || removed > 0) {
+    console.log(`[watcher] Startup cleanup: ${cleared} marker(s) cleared, ${removed} stale dir(s) removed.`);
   }
 }
 

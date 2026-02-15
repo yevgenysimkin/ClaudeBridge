@@ -66,7 +66,19 @@ register_session() {
 
 # --- Helper: build additionalContext string ---
 additional_context() {
-  echo "ClaudeBridge active. Your session ID is: ${SESSION_ID} — When using bridge.sh, always pass this as the first argument, e.g.: bridge.sh ${SESSION_ID} send \\\"message\\\" or bridge.sh ${SESSION_ID} wait or bridge.sh ${SESSION_ID} send-and-wait \\\"message\\\""
+  # Query current mode for context
+  local CURRENT_MODE
+  CURRENT_MODE=$(/usr/bin/curl -s --connect-timeout 1 --max-time 1 "http://127.0.0.1:9876/mode" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('mode','desktop'))" 2>/dev/null)
+  [ -z "$CURRENT_MODE" ] && CURRENT_MODE="desktop"
+
+  local MODE_INSTRUCTION=""
+  if [ "$CURRENT_MODE" = "phone" ]; then
+    MODE_INSTRUCTION="MODE IS PHONE: After each response, you MUST send it to the phone via: /Users/yevgenysimkin/AfM/ClaudeBridge/hooks/bridge.sh ${SESSION_ID} send \\\"your message\\\". Then wait for phone reply via: /Users/yevgenysimkin/AfM/ClaudeBridge/hooks/bridge.sh ${SESSION_ID} wait. Print the phone reply to terminal when received. Repeat until mode changes."
+  else
+    MODE_INSTRUCTION="Mode is DESKTOP: Normal terminal operation, no bridge.sh needed."
+  fi
+
+  echo "ClaudeBridge active. Session ID: ${SESSION_ID}. ${MODE_INSTRUCTION}"
 }
 
 # --- Read-only tools: register but never block ---
