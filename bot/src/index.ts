@@ -1,36 +1,51 @@
 import { config } from "dotenv";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "../../.env") });
 
 import { createServer } from "node:http";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { loadEnvConfig, loadAgentConfigs, AgentConfig } from "./config.js";
+import { writeFileSync, mkdirSync, existsSync, readdirSync, statSync, rmSync } from "node:fs";
+import { loadEnvConfig } from "./config.js";
 import { RelayClient } from "./relay-client.js";
 
-const PROMPT_FILENAME = ".claude-bridge-prompt";
+const BRIDGE_DIR = resolve(process.env.HOME || "/tmp", ".claude/bridge");
 const HOOK_PORT = 9876;
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// Pending permission responses: requestId → { resolve, channel }
+// --- Global Mode ---
+// Cached from relay. "desktop" = normal terminal permissions, "phone" = phone approves.
+let cachedMode: "phone" | "desktop" = "desktop";
+
+// --- Session Registry ---
+
+interface Session {
+  sessionId: string;
+  cwd: string;
+  name: string;
+  registeredAt: number;
+  lastSeen: number;
+}
+
+const sessions = new Map<string, Session>();
+
+// Pending permission responses: requestId → { resolve, sessionId }
 const pendingPermissions = new Map<
   string,
-  { resolve: (decision: { approved: boolean; message?: string }) => void; channel: string }
+  { resolve: (decision: { approved: boolean; message?: string }) => void; sessionId: string }
 >();
-
-// Agent configs indexed by channel ID
-let agents: Map<string, AgentConfig>;
 
 async function main(): Promise<void> {
   console.log("ClaudeBridge Watcher starting...");
 
   const envConfig = loadEnvConfig();
-  const agentConfigs = loadAgentConfigs();
-  agents = new Map(agentConfigs.map((a) => [a.id, a]));
-
   console.log(`[config] Relay: ${envConfig.relayUrl}`);
-  console.log(`[config] Channels: ${agentConfigs.map((a) => a.id).join(", ") || "(none)"}`);
+
+  // Ensure bridge directory exists
+  if (!existsSync(BRIDGE_DIR)) {
+    mkdirSync(BRIDGE_DIR, { recursive: true });
+  }
 
   // Connect to relay
   const relay = new RelayClient(envConfig.relayUrl, envConfig.relayAuthToken);
@@ -38,39 +53,50 @@ async function main(): Promise<void> {
   relay.onMessage((msg) => {
     const type = msg.type as string;
 
-    if (type === "message" && msg.sender === "user") {
-      // User sent a message from phone → write to prompt file
-      const channelId = msg.channel as string;
-      const content = msg.content as string;
-      const agent = agents.get(channelId);
-      if (agent) {
-        writePromptFile(agent.cwd, content);
-        console.log(`[watcher] Wrote prompt to ${agent.cwd}/${PROMPT_FILENAME}`);
-      }
+    // Cache mode from relay
+    if (type === "channel_list" && typeof msg.mode === "string") {
+      cachedMode = msg.mode as "phone" | "desktop";
+      console.log(`[watcher] Mode from relay: ${cachedMode}`);
+    }
+    if (type === "mode_changed" && typeof msg.mode === "string") {
+      cachedMode = msg.mode as "phone" | "desktop";
+      console.log(`[watcher] Mode changed: ${cachedMode}`);
     }
 
     if (type === "message" && msg.sender === "user") {
-      // Check if this is a permission response (y/n)
-      const content = (msg.content as string).trim().toLowerCase();
       const channelId = msg.channel as string;
+      const content = (msg.content as string).trim();
+      const session = sessions.get(channelId);
 
-      // Find any pending permission for this channel
+      if (!session) return;
+
+      // Check if this is a permission response (y/n/yes/no)
+      let handledAsPermission = false;
+      const contentLower = content.toLowerCase();
+
       for (const [reqId, pending] of pendingPermissions) {
-        if (pending.channel === channelId) {
-          if (content === "y" || content === "yes") {
+        if (pending.sessionId === channelId) {
+          if (contentLower === "y" || contentLower === "yes") {
             pending.resolve({ approved: true });
-          } else if (content === "n" || content === "no") {
+          } else if (contentLower === "n" || contentLower === "no") {
             pending.resolve({ approved: false });
           } else {
             pending.resolve({ approved: false, message: content });
           }
           pendingPermissions.delete(reqId);
+          handledAsPermission = true;
           break;
         }
       }
+
+      // If not a permission response, write as a prompt
+      if (!handledAsPermission) {
+        writePromptFile(session.sessionId, content);
+        console.log(`[watcher] Wrote prompt for session ${session.sessionId}`);
+      }
     }
 
-    // Also handle explicit permission_response messages from the app's approve/deny buttons
+    // Handle explicit permission_response messages (from app's approve/deny buttons)
     if (type === "permission_response") {
       const reqId = msg.requestId as string;
       const pending = pendingPermissions.get(reqId);
@@ -95,10 +121,8 @@ async function main(): Promise<void> {
     }, 200);
   });
 
-  // Register channels
-  for (const agent of agentConfigs) {
-    relay.registerChannel(agent.id, agent.name, "idle");
-  }
+  // Clean up stale session directories on startup
+  cleanupStaleSessions();
 
   // Start local HTTP server for hook scripts
   startHookServer(relay);
@@ -116,38 +140,122 @@ async function main(): Promise<void> {
 }
 
 /**
- * Write a prompt to the bridge prompt file in the given directory.
+ * Write a prompt to the session's prompt file.
  */
-function writePromptFile(cwd: string, content: string): void {
-  const promptPath = resolve(cwd, PROMPT_FILENAME);
-  // Ensure directory exists
-  if (!existsSync(cwd)) {
-    mkdirSync(cwd, { recursive: true });
+function writePromptFile(sessionId: string, content: string): void {
+  const sessionDir = resolve(BRIDGE_DIR, sessionId);
+  if (!existsSync(sessionDir)) {
+    mkdirSync(sessionDir, { recursive: true });
   }
-  writeFileSync(promptPath, content, "utf-8");
+  writeFileSync(resolve(sessionDir, "prompt"), content, "utf-8");
 }
 
 /**
- * Local HTTP server that hook scripts use to submit permission requests
- * and poll for responses. Keeps hooks simple (just curl).
+ * Derive a friendly display name from a cwd path.
+ * e.g. "/Users/yevgenysimkin/AfM/ClaudeBridge" → "ClaudeBridge"
+ */
+function deriveSessionName(cwd: string, sessionId: string): string {
+  const dir = basename(cwd);
+  const shortId = sessionId.slice(0, 8);
+  return dir ? `${dir} (${shortId})` : shortId;
+}
+
+/**
+ * Local HTTP server for hook scripts and bridge.sh.
  *
+ * GET  /mode        — returns current mode (phone/desktop)
+ * POST /register    — hook registers a new session
  * POST /permission  — hook submits a permission request
- *   Body: { channel, requestId, toolName, toolInput }
- *   Response: blocks until user responds, returns { approved, message? }
- *
- * The hook script does a single blocking curl and gets the answer.
+ * POST /message     — bridge.sh sends a message to the phone
  */
 function startHookServer(relay: RelayClient): void {
   const server = createServer(async (req, res) => {
+    // --- GET /mode ---
+    if (req.method === "GET" && req.url === "/mode") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ mode: cachedMode }));
+      return;
+    }
+
+    // --- POST /register ---
+    if (req.method === "POST" && req.url === "/register") {
+      let body = "";
+      req.on("data", (chunk: string) => (body += chunk));
+      req.on("end", () => {
+        try {
+          const { sessionId, cwd } = JSON.parse(body);
+
+          if (!sessionId) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "sessionId required" }));
+            return;
+          }
+
+          // Create or update session
+          const existing = sessions.get(sessionId);
+          if (existing) {
+            existing.lastSeen = Date.now();
+            existing.cwd = cwd || existing.cwd;
+          } else {
+            const name = deriveSessionName(cwd || "", sessionId);
+            const session: Session = {
+              sessionId,
+              cwd: cwd || "",
+              name,
+              registeredAt: Date.now(),
+              lastSeen: Date.now(),
+            };
+            sessions.set(sessionId, session);
+
+            // Register channel on relay
+            relay.registerChannel(sessionId, name, "running");
+            console.log(`[watcher] Session registered: ${sessionId} → ${name}`);
+          }
+
+          // Ensure session directory exists
+          const sessionDir = resolve(BRIDGE_DIR, sessionId);
+          if (!existsSync(sessionDir)) {
+            mkdirSync(sessionDir, { recursive: true });
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid request" }));
+        }
+      });
+      return;
+    }
+
+    // --- POST /permission ---
     if (req.method === "POST" && req.url === "/permission") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk));
+      req.on("data", (chunk: string) => (body += chunk));
       req.on("end", async () => {
         try {
-          const { channel, requestId, toolName, toolInput } = JSON.parse(body);
+          const { sessionId, requestId, toolName, toolInput, summary } = JSON.parse(body);
+
+          // Auto-register if not yet known
+          if (!sessions.has(sessionId)) {
+            const name = `Session (${sessionId.slice(0, 8)})`;
+            sessions.set(sessionId, {
+              sessionId,
+              cwd: "",
+              name,
+              registeredAt: Date.now(),
+              lastSeen: Date.now(),
+            });
+            relay.registerChannel(sessionId, name, "running");
+          }
+
+          sessions.get(sessionId)!.lastSeen = Date.now();
+
+          // Use summary if provided, otherwise fall back to tool name
+          const displayText = summary || `Permission request: ${toolName}`;
 
           // Forward to relay as a bot message with permission metadata
-          relay.sendBotMessage(channel, `Permission request: ${toolName}`, {
+          relay.sendBotMessage(sessionId, displayText, {
             needsAttention: true,
             permissionRequest: { requestId, toolName, toolInput },
           });
@@ -155,7 +263,7 @@ function startHookServer(relay: RelayClient): void {
           // Wait for response (with timeout)
           const decision = await new Promise<{ approved: boolean; message?: string }>(
             (resolveDecision) => {
-              pendingPermissions.set(requestId, { resolve: resolveDecision, channel });
+              pendingPermissions.set(requestId, { resolve: resolveDecision, sessionId });
 
               // 5 minute timeout
               setTimeout(() => {
@@ -174,43 +282,83 @@ function startHookServer(relay: RelayClient): void {
           res.end(JSON.stringify({ error: "Invalid request" }));
         }
       });
-    } else if (req.method === "POST" && req.url === "/message") {
-      // Claude Code sends a response to appear on the phone
-      let body = "";
-      req.on("data", (chunk) => (body += chunk));
-      req.on("end", () => {
-        try {
-          const { channel, content } = JSON.parse(body);
-          relay.sendBotMessage(channel, content);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true }));
-        } catch {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Invalid request" }));
-        }
-      });
-    } else if (req.method === "POST" && req.url === "/message") {
-      // Claude Code sends a response to appear on the phone
-      let body = "";
-      req.on("data", (chunk) => (body += chunk));
-      req.on("end", () => {
-        try {
-          const { channel, content } = JSON.parse(body);
-          relay.sendBotMessage(channel, content);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true }));
-        } catch {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Invalid request" }));
-        }
-      });
-    } else {
-      res.writeHead(404);
-      res.end("Not found");
+      return;
     }
+
+    // --- POST /message ---
+    if (req.method === "POST" && req.url === "/message") {
+      let body = "";
+      req.on("data", (chunk: string) => (body += chunk));
+      req.on("end", () => {
+        try {
+          const { sessionId, content } = JSON.parse(body);
+
+          if (!sessionId || !content) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "sessionId and content required" }));
+            return;
+          }
+
+          // Auto-register if not yet known
+          if (!sessions.has(sessionId)) {
+            const name = `Session (${sessionId.slice(0, 8)})`;
+            sessions.set(sessionId, {
+              sessionId,
+              cwd: "",
+              name,
+              registeredAt: Date.now(),
+              lastSeen: Date.now(),
+            });
+            relay.registerChannel(sessionId, name, "running");
+          }
+
+          sessions.get(sessionId)!.lastSeen = Date.now();
+
+          relay.sendBotMessage(sessionId, content);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid request" }));
+        }
+      });
+      return;
+    }
+
+    // --- Fallback ---
+    res.writeHead(404);
+    res.end("Not found");
   });
 
   server.listen(HOOK_PORT, "127.0.0.1");
+}
+
+/**
+ * Remove session directories older than 24 hours.
+ */
+function cleanupStaleSessions(): void {
+  if (!existsSync(BRIDGE_DIR)) return;
+  const now = Date.now();
+  let cleaned = 0;
+
+  for (const entry of readdirSync(BRIDGE_DIR)) {
+    // Skip non-directory entries and the "disabled" kill-switch file
+    const entryPath = resolve(BRIDGE_DIR, entry);
+    try {
+      const stat = statSync(entryPath);
+      if (!stat.isDirectory()) continue;
+      if (now - stat.mtimeMs > SESSION_MAX_AGE_MS) {
+        rmSync(entryPath, { recursive: true, force: true });
+        cleaned++;
+      }
+    } catch {
+      // Ignore errors on individual entries
+    }
+  }
+
+  if (cleaned > 0) {
+    console.log(`[watcher] Cleaned up ${cleaned} stale session(s).`);
+  }
 }
 
 main().catch((err) => {

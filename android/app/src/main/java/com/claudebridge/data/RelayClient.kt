@@ -12,8 +12,9 @@ class RelayClient(
     interface Listener {
         fun onConnected()
         fun onDisconnected()
-        fun onChannelList(channels: List<Channel>)
+        fun onChannelList(channels: List<Channel>, mode: String)
         fun onChannelUpdate(channelId: String, agentStatus: String?, pendingPermission: Boolean?)
+        fun onModeChanged(mode: String)
         fun onMessage(message: ChatMessage)
         fun onHistory(channelId: String, messages: List<ChatMessage>, hasMore: Boolean)
         fun onError(error: String)
@@ -85,6 +86,14 @@ class RelayClient(
         webSocket?.send(msg.toString())
     }
 
+    fun sendSetMode(mode: String) {
+        val msg = JSONObject().apply {
+            put("type", "set_mode")
+            put("mode", mode)
+        }
+        webSocket?.send(msg.toString())
+    }
+
     fun requestHistory(channel: String, limit: Int = 50, before: Long? = null) {
         val msg = JSONObject().apply {
             put("type", "history")
@@ -112,7 +121,13 @@ class RelayClient(
 
             "channel_list" -> {
                 val channels = parseChannelList(json.getJSONArray("channels"))
-                listener?.onChannelList(channels)
+                val mode = json.optString("mode", "desktop")
+                listener?.onChannelList(channels, mode)
+            }
+
+            "mode_changed" -> {
+                val mode = json.getString("mode")
+                listener?.onModeChanged(mode)
             }
 
             "channel_update" -> {

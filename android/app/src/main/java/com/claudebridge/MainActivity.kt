@@ -56,6 +56,7 @@ fun ClaudeBridgeNavHost() {
     val prefs = remember { Preferences(context) }
 
     val connected by vm.connected.collectAsState()
+    val mode by vm.mode.collectAsState()
     val channels by vm.channels.collectAsState()
     val allMessages by vm.messages.collectAsState()
     val currentChannel by vm.currentChannel.collectAsState()
@@ -72,6 +73,8 @@ fun ClaudeBridgeNavHost() {
             ChannelListScreen(
                 channels = channels,
                 connected = connected,
+                mode = mode,
+                onModeToggle = { vm.toggleMode() },
                 onChannelClick = { channelId ->
                     vm.selectChannel(channelId)
                     navController.navigate("chat/$channelId")

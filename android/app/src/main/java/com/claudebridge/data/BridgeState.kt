@@ -12,6 +12,10 @@ object BridgeState {
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected
 
+    // Global mode: "phone" or "desktop"
+    private val _mode = MutableStateFlow("desktop")
+    val mode: StateFlow<String> = _mode
+
     private val _channels = MutableStateFlow<List<Channel>>(emptyList())
     val channels: StateFlow<List<Channel>> = _channels
 
@@ -24,6 +28,10 @@ object BridgeState {
 
     fun setConnected(value: Boolean) {
         _connected.value = value
+    }
+
+    fun setMode(mode: String) {
+        _mode.value = mode
     }
 
     fun setChannels(list: List<Channel>) {
@@ -71,6 +79,7 @@ object BridgeState {
 
     fun clear() {
         _connected.value = false
+        _mode.value = "desktop"
         _channels.value = emptyList()
         _messages.value = emptyMap()
         _error.value = null

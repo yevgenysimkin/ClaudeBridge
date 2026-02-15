@@ -54,13 +54,20 @@ export interface BotMessage {
   metadata?: MessageMetadata;
 }
 
+/** App sets the global mode (phone or desktop). */
+export interface SetMode {
+  type: "set_mode";
+  mode: "phone" | "desktop";
+}
+
 export type ClientMessage =
   | AuthMessage
   | SendMessage
   | PermissionResponse
   | HistoryRequest
   | RegisterChannel
-  | BotMessage;
+  | BotMessage
+  | SetMode;
 
 // --- Relay → Client ---
 
@@ -123,6 +130,7 @@ export interface ChannelList {
     unread: number;
     pendingPermission: boolean;
   }>;
+  mode: "phone" | "desktop";
 }
 
 /** Channel status update. */
@@ -142,6 +150,12 @@ export interface HistoryResponse {
   hasMore: boolean;
 }
 
+/** Broadcast when global mode changes. */
+export interface ModeChanged {
+  type: "mode_changed";
+  mode: "phone" | "desktop";
+}
+
 /** Error from relay. */
 export interface RelayError {
   type: "error";
@@ -153,5 +167,6 @@ export type RelayMessage =
   | ChannelMessage
   | ChannelList
   | ChannelUpdate
+  | ModeChanged
   | HistoryResponse
   | RelayError;

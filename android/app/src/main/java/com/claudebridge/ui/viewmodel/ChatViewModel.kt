@@ -28,6 +28,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // Delegate to BridgeState
     val connected = BridgeState.connected
+    val mode = BridgeState.mode
     val channels = BridgeState.channels
     val messages = BridgeState.messages
     val error = BridgeState.error
@@ -91,6 +92,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun denyPermission(channel: String, requestId: String, reason: String? = null) {
         service?.sendPermissionResponse(channel, requestId, approved = false, message = reason)
+    }
+
+    fun toggleMode() {
+        val newMode = if (BridgeState.mode.value == "phone") "desktop" else "phone"
+        service?.setMode(newMode)
+        // Optimistic update — relay will broadcast confirmation
+        BridgeState.setMode(newMode)
     }
 
     private fun unbind() {

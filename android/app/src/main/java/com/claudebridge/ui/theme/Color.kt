@@ -23,3 +23,6 @@ val DenyRed = Color(0xFFEF4444)
 val BotBubble = Color(0xFF1E293B)
 val UserBubble = Color(0xFF1E3A5F)
 val SystemBubble = Color(0xFF2D1B4E)
+
+val ModePhone = Color(0xFF22C55E)         // Green when PHONE mode active
+val ModeDesktop = Color(0xFF6B7280)       // Gray when DESKTOP mode

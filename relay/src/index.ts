@@ -7,6 +7,7 @@ import type {
   RelayMessage,
   ChannelList,
   ChannelMessage,
+  ModeChanged,
 } from "./protocol.js";
 
 // --- Config ---
@@ -31,6 +32,11 @@ interface Client {
 
 const clients = new Set<Client>();
 
+// Global mode: "phone" means permission requests go to the phone app,
+// "desktop" (default) means normal terminal permission prompts.
+// Auto-resets to "desktop" when all app clients disconnect.
+let currentMode: "phone" | "desktop" = "desktop";
+
 const channelRegistry = new Map<string, {
   name: string;
   agentStatus: "running" | "stopped" | "idle";
@@ -45,6 +51,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
+      mode: currentMode,
       clients: clients.size,
       channels: channelRegistry.size,
     }));
@@ -100,6 +107,9 @@ wss.on("connection", (ws) => {
       case "permission_response":
         handlePermissionResponse(msg.channel, msg.requestId, msg.approved, msg.message);
         break;
+      case "set_mode":
+        handleSetMode(client, msg.mode);
+        break;
       case "history":
         handleHistory(client, msg.channel, msg.limit, msg.before);
         break;
@@ -112,6 +122,16 @@ wss.on("connection", (ws) => {
     clients.delete(client);
     clearTimeout(authTimer);
     console.log(`[relay] ${client.clientType} disconnected. Clients: ${clients.size}`);
+
+    // Auto-reset to desktop when all app clients disconnect
+    if (client.clientType === "app" && client.authenticated) {
+      const appClients = [...clients].filter(c => c.clientType === "app" && c.authenticated);
+      if (appClients.length === 0 && currentMode === "phone") {
+        currentMode = "desktop";
+        console.log("[relay] All app clients disconnected — mode reset to desktop.");
+        broadcastModeChanged();
+      }
+    }
   });
 
   ws.on("error", (err) => console.error("[relay] WS error:", err.message));
@@ -209,6 +229,18 @@ function handlePermissionResponse(
   }
 }
 
+function handleSetMode(client: Client, mode: "phone" | "desktop"): void {
+  if (client.clientType !== "app") {
+    send(client.ws, { type: "error", message: "Only app clients can set mode." });
+    return;
+  }
+  if (currentMode === mode) return;
+
+  currentMode = mode;
+  console.log(`[relay] Mode set to: ${mode}`);
+  broadcastModeChanged();
+}
+
 function handleHistory(client: Client, channel: string, limit?: number, before?: number): void {
   const result = store.getHistory(channel, limit, before);
   send(client.ws, {
@@ -255,6 +287,7 @@ function sendChannelList(client: Client): void {
       unread: 0,
       pendingPermission: info.pendingPermission,
     })),
+    mode: currentMode,
   };
   send(client.ws, list);
 }
@@ -263,6 +296,11 @@ function broadcastChannelList(): void {
   for (const c of clients) {
     if (c.authenticated) sendChannelList(c);
   }
+}
+
+function broadcastModeChanged(): void {
+  const msg: ModeChanged = { type: "mode_changed", mode: currentMode };
+  broadcast(msg);
 }
 
 function broadcastChannelUpdate(channel: string): void {

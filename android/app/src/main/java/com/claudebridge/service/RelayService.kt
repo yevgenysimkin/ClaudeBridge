@@ -65,6 +65,10 @@ class RelayService : Service(), RelayClient.Listener {
         relayClient?.requestHistory(channel, limit, before)
     }
 
+    fun setMode(mode: String) {
+        relayClient?.sendSetMode(mode)
+    }
+
     val isConnected: Boolean get() = relayClient?.isConnected ?: false
 
     // --- RelayClient.Listener ---
@@ -80,8 +84,13 @@ class RelayService : Service(), RelayClient.Listener {
         updateConnectionNotification("Disconnected")
     }
 
-    override fun onChannelList(channels: List<Channel>) {
+    override fun onChannelList(channels: List<Channel>, mode: String) {
         BridgeState.setChannels(channels)
+        BridgeState.setMode(mode)
+    }
+
+    override fun onModeChanged(mode: String) {
+        BridgeState.setMode(mode)
     }
 
     override fun onChannelUpdate(channelId: String, agentStatus: String?, pendingPermission: Boolean?) {

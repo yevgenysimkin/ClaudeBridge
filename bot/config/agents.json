@@ -1,9 +1,0 @@
-{
-  "agents": [
-    {
-      "id": "claudebridge",
-      "name": "ClaudeBridge Dev",
-      "cwd": "/Users/yevgenysimkin/AfM/ClaudeBridge"
-    }
-  ]
-}
