@@ -6,85 +6,86 @@ A bridge that lets you monitor and interact with Claude Code sessions from your 
 ## Architecture
 
 ```
-Terminal 1: Claude Code ──┐                         ┌─────────────┐
-Terminal 2: Claude Code ──┼── hooks + bridge.sh ──→ │  Watcher     │
-Terminal 3: Claude Code ──┘                         │  (Node.js)   │
-                                                    └──────┬───────┘
-                                                           │ WebSocket
-                                                    ┌──────▼───────┐
-                                                    │  Relay        │──▶ Android App
-                                                    │  (Railway)    │◀── Android App
-                                                    └──────────────┘
+┌─────────────┐
+│ Claude Code  │  ← thinks it's a normal TTY (isatty()=true)
+└──────┬──────┘
+       │ PTY (stdin/stdout)
+┌──────┴──────┐
+│  PTY Proxy   │  ← spawns Claude, multiplexes I/O
+└──┬───────┬──┘
+   │       │
+   ▼       ▼
+ Local    Relay (Railway)  ←→  Phone App
+Terminal   claudebridge-production.up.railway.app
+   │       │
+   └───┬───┘
+       │ input from either side
+       ▼
+  PTY stdin → Claude Code
 ```
 
-- **Relay** runs on Railway (`cb.pinewell.xyz`) — WebSocket server with SQLite persistence
-- **Watcher** runs on your laptop — bridges Claude Code sessions to the relay
-- **Claude Code sessions** use `bridge.sh` to send/receive and hooks for permissions
-- **Android app** connects via WSS — foreground service for notifications
+- **PTY Proxy** wraps Claude Code in a pseudo-terminal — output goes to both local terminal and phone
+- **Relay** runs on Railway — WebSocket server with in-memory ring buffers per channel
+- **Android app** shows a terminal mirror — scrolling output, text input, approve/deny permissions
+- Input from **either surface** (local keyboard or phone) goes to the same PTY stdin
 
 ## Repository & Infrastructure Map
 
 | Component | Location | Runs On | Purpose |
 |-----------|----------|---------|---------|
-| Relay Server | `relay/` | Railway | WebSocket relay + SQLite message store |
-| Watcher | `bot/` | Laptop | Node.js — routes messages between sessions and relay |
-| Hook scripts | `hooks/` | Laptop | Permission handling + message relay for Claude Code |
-| Android App | `android/` | Phone | Kotlin/Compose — chat + permission approvals |
-| Channel configs | `bot/config/agents.json` | Laptop | Maps channel IDs to project directories |
+| Relay Server | `relay/` | Railway | WebSocket relay + per-channel ring buffers |
+| PTY Proxy | `proxy/` | Laptop | Spawns Claude via node-pty, multiplexes I/O |
+| Android App | `android/` | Phone | Kotlin/Compose — terminal mirror + permissions |
+
+**Relay URL:** `claudebridge-production.up.railway.app`
 
 ## Key Files
 
-- `relay/src/index.ts` — WebSocket server, HTTP health endpoint, message routing
-- `relay/src/protocol.ts` — Shared protocol types
-- `relay/src/store.ts` — SQLite message persistence
-- `bot/src/index.ts` — Watcher: relay client + local HTTP server for hooks
-- `bot/src/relay-client.ts` — WebSocket client with auto-reconnect
-- `bot/src/config.ts` — Config loading + validation
-- `hooks/bridge.sh` — Script Claude Code calls to send messages / wait for prompts
-- `hooks/bridge-hook.sh` — PreToolUse hook for remote permission approval
+- `relay/src/index.ts` — WebSocket server, HTTP health endpoint, pty_output/pty_input routing
+- `relay/src/protocol.ts` — Shared protocol types (PtyOutput, PtyInput, BufferSync, etc.)
+- `proxy/src/pty-proxy.ts` — Core PTY proxy: spawns Claude, mirrors I/O, sends to relay
+- `proxy/src/relay-client.ts` — WebSocket client with auto-reconnect (logs to stderr)
+- `proxy/src/ansi.ts` — ANSI stripping + permission prompt detection
+- `proxy/src/config.ts` — Config loading from .env
 - `android/app/src/main/java/com/claudebridge/` — Android app source
 
-## Remote Prompt System
+## How It Works
 
-### For each project that uses ClaudeBridge:
+### Starting a session:
+```bash
+node /Users/yevgenysimkin/AfM/ClaudeBridge/proxy/dist/pty-proxy.js
+```
+This spawns `claude` (or `$CLAUDE_CMD`) inside a PTY and connects to the relay.
 
-1. Set the channel env var (in project CLAUDE.md or shell):
-   ```
-   export CLAUDE_BRIDGE_CHANNEL="my-project"
-   ```
+### I/O flow:
+- **Claude output** → written to local stdout AND sent as `pty_output` to relay → phone
+- **Local keyboard input** → written to PTY stdin (Claude sees it normally)
+- **Phone text input** → sent as `pty_input` via relay → written to PTY stdin
+- **Permission prompts** → detected via regex, phone shows Approve/Deny buttons
+- **Phone approve** → sends `y\n` as `pty_input` → PTY stdin → Claude continues
+- **Phone deny** → sends `n\n` as `pty_input`
 
-2. Add the channel to `bot/config/agents.json`:
-   ```json
-   { "id": "my-project", "name": "My Project", "cwd": "/path/to/project" }
-   ```
+### Reconnection:
+- Relay keeps a 500-chunk ring buffer per channel
+- When the phone app connects, relay sends `buffer_sync` with accumulated output
+- Phone immediately has context of the current session
 
-3. When Claude Code finishes a task and the user is away, it should run:
-   ```bash
-   /Users/yevgenysimkin/AfM/ClaudeBridge/hooks/bridge.sh send-and-wait "Done. Here's what I did: ..."
-   ```
-   This sends the response to the phone and blocks until the user sends a new prompt.
+## Protocol Messages
 
-4. When the blocked command returns content, treat it as the next user instruction.
-
-### How it works under the hood:
-- `bridge.sh send "msg"` — POSTs to the local watcher, which forwards to relay → phone
-- `bridge.sh wait` — uses `fswatch` to block until `.claude-bridge-prompt` file is written
-- `bridge.sh send-and-wait "msg"` — both in one call
-- Phone messages arrive at watcher via WebSocket, get written to `.claude-bridge-prompt`
-- `fswatch` detects the change, `bridge.sh wait` returns the content
-
-## Permission Hooks
-
-The `PreToolUse` hook (`hooks/bridge-hook.sh`) intercepts permission prompts:
-1. Claude Code asks to use a tool
-2. Hook POSTs the request to the local watcher
-3. Watcher forwards to relay → phone notification
-4. User taps Approve/Deny on phone
-5. Response flows back: phone → relay → watcher → hook → Claude Code continues
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `pty_output` | proxy → relay → app | Terminal output chunk |
+| `pty_input` | app → relay → proxy | Keystrokes/text from phone |
+| `buffer_sync` | relay → app | Full buffer on reconnect |
+| `ping`/`pong` | relay ↔ clients | Connectivity verification |
+| `auth` | client → relay | Authentication |
+| `register_channel` | proxy → relay | Register a session |
+| `channel_list` | relay → app | Active sessions |
+| `channel_update` | relay → app | Status changes |
 
 ## Convention Notes
 
-- **No magic values inline** — constants in companion objects (Android) or at file top (TS).
-- **ESM + TypeScript strict mode** throughout bot and relay.
-- File `.claude-bridge-prompt` is the prompt injection point — lives in each project's root.
-- Watcher's local HTTP server runs on port 9876 (localhost only).
+- **No magic values inline** — constants in companion objects (Android) or at file top (TS)
+- **ESM + TypeScript strict mode** throughout proxy and relay
+- PTY proxy logs to **stderr** (stdout is reserved for the PTY passthrough)
+- Ring buffer size: 500 chunks (relay), 100K chars (Android BridgeState)

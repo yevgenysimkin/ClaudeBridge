@@ -1,0 +1,28 @@
+{
+  "name": "claudebridge-proxy",
+  "version": "0.1.0",
+  "description": "PTY proxy: wraps Claude Code, mirrors I/O to local terminal and phone via relay",
+  "type": "module",
+  "main": "dist/pty-proxy.js",
+  "scripts": {
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper 2>/dev/null || true",
+    "build": "tsc",
+    "dev": "tsx src/pty-proxy.ts",
+    "start": "node dist/pty-proxy.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

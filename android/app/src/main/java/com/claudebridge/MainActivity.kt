@@ -16,7 +16,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.claudebridge.data.Preferences
 import com.claudebridge.ui.screen.ChannelListScreen
-import com.claudebridge.ui.screen.ChatScreen
+import com.claudebridge.ui.screen.TerminalScreen
 import com.claudebridge.ui.screen.SettingsScreen
 import com.claudebridge.ui.theme.ClaudeBridgeTheme
 import com.claudebridge.ui.viewmodel.ChatViewModel
@@ -56,9 +56,11 @@ fun ClaudeBridgeNavHost() {
     val prefs = remember { Preferences(context) }
 
     val connected by vm.connected.collectAsState()
-    val mode by vm.mode.collectAsState()
     val channels by vm.channels.collectAsState()
-    val allMessages by vm.messages.collectAsState()
+    val buffers by vm.buffers.collectAsState()
+    val displayBuffers by vm.displayBuffers.collectAsState()
+    val activePermission by vm.activePermission.collectAsState()
+    val permissionOptions by vm.permissionOptions.collectAsState()
     val currentChannel by vm.currentChannel.collectAsState()
 
     // Auto-connect on launch if configured
@@ -73,11 +75,10 @@ fun ClaudeBridgeNavHost() {
             ChannelListScreen(
                 channels = channels,
                 connected = connected,
-                mode = mode,
-                onModeToggle = { vm.toggleMode() },
+                onRefresh = { vm.refresh() },
                 onChannelClick = { channelId ->
                     vm.selectChannel(channelId)
-                    navController.navigate("chat/$channelId")
+                    navController.navigate("terminal/$channelId")
                 },
                 onSettingsClick = {
                     navController.navigate("settings")
@@ -85,21 +86,28 @@ fun ClaudeBridgeNavHost() {
             )
         }
 
-        composable("chat/{channelId}") { backStackEntry ->
+        composable("terminal/{channelId}") { backStackEntry ->
             val channelId = backStackEntry.arguments?.getString("channelId") ?: return@composable
             val channel = channels.find { it.id == channelId }
-            val msgs = allMessages[channelId] ?: emptyList()
+            val buffer = buffers[channelId] ?: ""
 
-            ChatScreen(
+            TerminalScreen(
                 channelName = channel?.name ?: channelId,
-                messages = msgs,
+                channelId = channelId,
+                buffer = buffer,
+                displayBuffer = displayBuffers[channelId] ?: "",
+                hasPermission = activePermission == channelId,
+                permissionOptions = if (activePermission == channelId) permissionOptions else emptyList(),
                 onBack = {
                     vm.selectChannel(null)
                     navController.popBackStack()
                 },
-                onSend = { content -> vm.sendMessage(content) },
-                onApprove = { requestId -> vm.approvePermission(channelId, requestId) },
-                onDeny = { requestId -> vm.denyPermission(channelId, requestId) }
+                onSend = { text -> vm.sendInput(text) },
+                onApprove = { vm.sendRaw(channelId, "y\n") },
+                onDeny = { vm.sendRaw(channelId, "n\n") },
+                onSelectOption = { number -> vm.selectOption(channelId, number) },
+                onClearBuffer = { vm.clearBuffer(channelId) },
+                onSendEsc = { vm.sendEsc(channelId) }
             )
         }
 

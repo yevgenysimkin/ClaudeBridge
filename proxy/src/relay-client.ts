@@ -1,13 +1,26 @@
 import WebSocket from "ws";
+import { appendFileSync } from "node:fs";
 
 const RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+const PING_INTERVAL_MS = 25_000; // Keep connection alive through Railway's proxy
 
 export type RelayMessageHandler = (msg: Record<string, unknown>) => void;
+
+// --- File-based logging (stderr corrupts Claude Code's TUI) ---
+
+const LOG_FILE = process.env.BRIDGE_LOG || "/tmp/claudebridge-proxy.log";
+
+function log(msg: string): void {
+  const ts = new Date().toISOString().slice(11, 19);
+  appendFileSync(LOG_FILE, `${ts} ${msg}\n`);
+}
 
 /**
  * WebSocket client that connects to the ClaudeBridge relay.
  * Handles auth, reconnection, and message routing.
+ *
+ * All logging goes to a file (not stderr) to avoid corrupting the PTY TUI.
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
@@ -17,6 +30,7 @@ export class RelayClient {
   private reconnectDelay = RECONNECT_DELAY_MS;
   private stopping = false;
   private authenticated = false;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(relayUrl: string, authToken: string) {
     // Convert http(s) to ws(s)
@@ -39,24 +53,12 @@ export class RelayClient {
   send(msg: Record<string, unknown>): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
-    } else {
-      console.warn("[relay-client] Cannot send — not connected.");
     }
   }
 
-  /** Register a channel (agent) with the relay. */
+  /** Register a channel with the relay. */
   registerChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
     this.send({ type: "register_channel", channel, name, agentStatus });
-  }
-
-  /** Send a bot message with optional metadata. */
-  sendBotMessage(channel: string, content: string, metadata?: Record<string, unknown>): void {
-    this.send({ type: "bot_message", channel, content, metadata });
-  }
-
-  /** Send a plain text message. */
-  sendText(channel: string, content: string): void {
-    this.send({ type: "send", channel, content });
   }
 
   /** Whether the client is connected and authenticated. */
@@ -67,21 +69,49 @@ export class RelayClient {
   /** Disconnect and stop reconnecting. */
   stop(): void {
     this.stopping = true;
-    this.ws?.close();
-    this.ws = null;
+    this.cleanup();
   }
 
   // --- Private ---
 
+  private cleanup(): void {
+    this.stopPing();
+    if (this.ws) {
+      // Remove all listeners to prevent ghost events from old sockets
+      this.ws.removeAllListeners();
+      try { this.ws.close(); } catch { /* ignore */ }
+      this.ws = null;
+    }
+    this.authenticated = false;
+  }
+
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.ping();
+      }
+    }, PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
   private doConnect(): void {
     if (this.stopping) return;
 
-    console.log(`[relay-client] Connecting to ${this.relayUrl}...`);
+    // Clean up any previous connection before creating a new one
+    this.cleanup();
+
+    log(`Connecting to ${this.relayUrl}...`);
     this.ws = new WebSocket(this.relayUrl);
-    this.authenticated = false;
 
     this.ws.on("open", () => {
-      console.log("[relay-client] Connected. Authenticating...");
+      log("Connected. Authenticating...");
       this.reconnectDelay = RECONNECT_DELAY_MS;
       this.ws!.send(JSON.stringify({
         type: "auth",
@@ -95,7 +125,7 @@ export class RelayClient {
       try {
         msg = JSON.parse(raw.toString());
       } catch {
-        console.warn("[relay-client] Invalid JSON from relay.");
+        log("Invalid JSON from relay.");
         return;
       }
 
@@ -103,9 +133,10 @@ export class RelayClient {
       if (msg.type === "auth_result") {
         if (msg.success) {
           this.authenticated = true;
-          console.log("[relay-client] Authenticated.");
+          this.startPing();
+          log("Authenticated.");
         } else {
-          console.error("[relay-client] Auth failed:", msg.error);
+          log(`Auth failed: ${msg.error}`);
           this.stopping = true;
           this.ws?.close();
         }
@@ -120,15 +151,16 @@ export class RelayClient {
 
     this.ws.on("close", () => {
       this.authenticated = false;
+      this.stopPing();
       if (!this.stopping) {
-        console.log(`[relay-client] Disconnected. Reconnecting in ${this.reconnectDelay / 1000}s...`);
+        log(`Disconnected. Reconnecting in ${this.reconnectDelay / 1000}s...`);
         setTimeout(() => this.doConnect(), this.reconnectDelay);
         this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, MAX_RECONNECT_DELAY_MS);
       }
     });
 
     this.ws.on("error", (err) => {
-      console.error("[relay-client] Error:", err.message);
+      log(`Error: ${err.message}`);
     });
   }
 }

@@ -1,20 +1,18 @@
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { MessageStore } from "./store.js";
 import type {
   ClientMessage,
   AuthMessage,
   RelayMessage,
   ChannelList,
-  ChannelMessage,
-  ModeChanged,
+  PtyOutput,
 } from "./protocol.js";
 
 // --- Config ---
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const AUTH_TOKEN = process.env.RELAY_AUTH_TOKEN;
-const DB_PATH = process.env.DB_PATH || "/data/relay.db";
 const AUTH_TIMEOUT_MS = 10_000;
+const RING_BUFFER_SIZE = 500; // chunks per channel
 
 if (!AUTH_TOKEN) {
   console.error("FATAL: RELAY_AUTH_TOKEN is not set.");
@@ -22,7 +20,6 @@ if (!AUTH_TOKEN) {
 }
 
 // --- State ---
-const store = new MessageStore(DB_PATH);
 
 interface Client {
   ws: WebSocket;
@@ -32,18 +29,14 @@ interface Client {
 
 const clients = new Set<Client>();
 
-// Global mode: "phone" means permission requests go to the phone app,
-// "desktop" (default) means normal terminal permission prompts.
-// Auto-resets to "desktop" when all app clients disconnect.
-let currentMode: "phone" | "desktop" = "desktop";
-
 const channelRegistry = new Map<string, {
   name: string;
   agentStatus: "running" | "stopped" | "idle";
   pendingPermission: boolean;
 }>();
 
-channelRegistry.set("ops", { name: "Ops", agentStatus: "idle", pendingPermission: false });
+// Per-channel ring buffer for reconnecting clients
+const channelBuffers = new Map<string, string[]>();
 
 // --- HTTP server ---
 const server = createServer((req, res) => {
@@ -51,7 +44,6 @@ const server = createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
-      mode: currentMode,
       clients: clients.size,
       channels: channelRegistry.size,
     }));
@@ -95,26 +87,26 @@ wss.on("connection", (ws) => {
     }
 
     switch (msg.type) {
-      case "send":
-        handleSend(client, msg.channel, msg.content);
-        break;
-      case "bot_message":
-        handleBotMessage(client, msg.channel, msg.content, msg.metadata);
-        break;
       case "register_channel":
         handleRegisterChannel(msg.channel, msg.name, msg.agentStatus);
         break;
-      case "permission_response":
-        handlePermissionResponse(msg.channel, msg.requestId, msg.approved, msg.message);
+      case "remove_channel":
+        handleRemoveChannel(msg.channel);
         break;
-      case "set_mode":
-        handleSetMode(client, msg.mode);
+      case "pty_output":
+        handlePtyOutput(client, msg);
         break;
-      case "history":
-        handleHistory(client, msg.channel, msg.limit, msg.before);
+      case "pty_input":
+        handlePtyInput(client, msg.channel, msg.data);
+        break;
+      case "ping":
+        handlePing(client, msg.pingId);
+        break;
+      case "pong":
+        handlePong(client, msg.pingId);
         break;
       default:
-        send(ws, { type: "error", message: `Unknown message type.` });
+        send(ws, { type: "error", message: "Unknown message type." });
     }
   });
 
@@ -122,16 +114,6 @@ wss.on("connection", (ws) => {
     clients.delete(client);
     clearTimeout(authTimer);
     console.log(`[relay] ${client.clientType} disconnected. Clients: ${clients.size}`);
-
-    // Auto-reset to desktop when all app clients disconnect
-    if (client.clientType === "app" && client.authenticated) {
-      const appClients = [...clients].filter(c => c.clientType === "app" && c.authenticated);
-      if (appClients.length === 0 && currentMode === "phone") {
-        currentMode = "desktop";
-        console.log("[relay] All app clients disconnected — mode reset to desktop.");
-        broadcastModeChanged();
-      }
-    }
   });
 
   ws.on("error", (err) => console.error("[relay] WS error:", err.message));
@@ -150,37 +132,22 @@ function handleAuth(client: Client, msg: AuthMessage): void {
   client.clientType = msg.clientType;
   send(client.ws, { type: "auth_result", success: true });
   sendChannelList(client);
-  console.log(`[relay] ${msg.clientType} authenticated. Clients: ${clients.size}`);
-}
 
-function handleSend(client: Client, channel: string, content: string): void {
-  const sender = client.clientType === "bot" ? "bot" : "user";
-  const stored = store.addMessage(channel, sender, content);
-  broadcast(stored);
-}
-
-function handleBotMessage(
-  client: Client,
-  channel: string,
-  content: string,
-  metadata?: ChannelMessage["metadata"],
-): void {
-  if (client.clientType !== "bot") {
-    send(client.ws, { type: "error", message: "Only bot clients can send bot_message." });
-    return;
-  }
-
-  const stored = store.addMessage(channel, "bot", content, metadata);
-  broadcast(stored);
-
-  // Update pending permission flag if this is a permission request
-  if (metadata?.needsAttention) {
-    const info = channelRegistry.get(channel);
-    if (info) {
-      info.pendingPermission = true;
-      broadcastChannelUpdate(channel);
+  // Send buffer catch-up for all channels to reconnecting app clients
+  if (client.clientType === "app") {
+    for (const [channel, buffer] of channelBuffers) {
+      if (buffer.length > 0) {
+        send(client.ws, {
+          type: "buffer_sync",
+          channel,
+          data: buffer.join(""),
+          timestamp: Date.now(),
+        });
+      }
     }
   }
+
+  console.log(`[relay] ${msg.clientType} authenticated. Clients: ${clients.size}`);
 }
 
 function handleRegisterChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
@@ -191,72 +158,93 @@ function handleRegisterChannel(channel: string, name: string, agentStatus: "runn
   } else {
     channelRegistry.set(channel, { name, agentStatus, pendingPermission: false });
   }
+  // Initialize ring buffer if needed
+  if (!channelBuffers.has(channel)) {
+    channelBuffers.set(channel, []);
+  }
   broadcastChannelList();
   console.log(`[relay] Channel registered: ${channel} (${name}) [${agentStatus}]`);
 }
 
-function handlePermissionResponse(
-  channel: string,
-  requestId: string,
-  approved: boolean,
-  message?: string,
-): void {
-  // Store the user's response as a message
-  const content = approved ? "✅ Approved" : `❌ Denied${message ? `: ${message}` : ""}`;
-  const stored = store.addMessage(channel, "user", content);
-  broadcast(stored);
-
-  // Forward the structured response to all bot clients
-  const response: RelayMessage = {
-    type: "message",
-    id: stored.id,
-    channel,
-    sender: "system",
-    content: "",
-    timestamp: stored.timestamp,
-    metadata: {
-      permissionRequest: { requestId, toolName: "", toolInput: {} },
-      // The bot matches on requestId and the fact that it came from system sender
-    },
-  };
-  broadcastToBots(response);
-
-  // Clear pending flag
-  const info = channelRegistry.get(channel);
-  if (info) {
-    info.pendingPermission = false;
-    broadcastChannelUpdate(channel);
+function handleRemoveChannel(channel: string): void {
+  if (channelRegistry.delete(channel)) {
+    channelBuffers.delete(channel);
+    broadcastChannelList();
+    console.log(`[relay] Channel removed: ${channel}`);
   }
 }
 
-function handleSetMode(client: Client, mode: "phone" | "desktop"): void {
-  if (client.clientType !== "app") {
-    send(client.ws, { type: "error", message: "Only app clients can set mode." });
+function handlePtyOutput(client: Client, msg: PtyOutput): void {
+  if (client.clientType !== "bot") {
+    send(client.ws, { type: "error", message: "Only bot clients can send pty_output." });
     return;
   }
-  if (currentMode === mode) return;
 
-  currentMode = mode;
-  console.log(`[relay] Mode set to: ${mode}`);
-  broadcastModeChanged();
+  // Append to ring buffer
+  let buffer = channelBuffers.get(msg.channel);
+  if (!buffer) {
+    buffer = [];
+    channelBuffers.set(msg.channel, buffer);
+  }
+  buffer.push(msg.data);
+  if (buffer.length > RING_BUFFER_SIZE) {
+    buffer.shift();
+  }
+
+  // Update pending permission flag
+  if (msg.isPermission) {
+    const info = channelRegistry.get(msg.channel);
+    if (info && !info.pendingPermission) {
+      info.pendingPermission = true;
+      broadcastChannelUpdate(msg.channel);
+    }
+  }
+
+  // Broadcast to app clients only (proxy already has the output locally)
+  broadcastToApps(msg);
 }
 
-function handleHistory(client: Client, channel: string, limit?: number, before?: number): void {
-  const result = store.getHistory(channel, limit, before);
-  send(client.ws, {
-    type: "history_response",
-    channel,
-    messages: result.messages,
-    hasMore: result.hasMore,
-  });
+function handlePtyInput(client: Client, channel: string, data: string): void {
+  // Forward input from app to bot (PTY proxy)
+  const msg: RelayMessage = { type: "pty_input", channel, data };
+  broadcastToBots(msg);
+
+  // If this looks like a permission response, clear the pending flag
+  // Recognizes: y/n/yes/no and digit strings (numbered option selection)
+  const trimmed = data.trim().toLowerCase();
+  if (trimmed === "y" || trimmed === "n" || trimmed === "yes" || trimmed === "no" || /^\d+$/.test(trimmed)) {
+    const info = channelRegistry.get(channel);
+    if (info && info.pendingPermission) {
+      info.pendingPermission = false;
+      broadcastChannelUpdate(channel);
+    }
+  }
+}
+
+function handlePing(_client: Client, pingId: string): void {
+  const msg = JSON.stringify({ type: "ping", pingId });
+  for (const c of clients) {
+    if (c.authenticated && c.clientType === "app" && c.ws.readyState === WebSocket.OPEN) {
+      c.ws.send(msg);
+    }
+  }
+}
+
+function handlePong(_client: Client, pingId: string): void {
+  const msg = JSON.stringify({ type: "pong", pingId });
+  for (const c of clients) {
+    if (c.authenticated && c.clientType === "bot" && c.ws.readyState === WebSocket.OPEN) {
+      c.ws.send(msg);
+    }
+  }
 }
 
 // --- Broadcasting ---
 
-function broadcast(msg: RelayMessage): void {
+function broadcastToApps(msg: RelayMessage): void {
   const json = JSON.stringify(msg);
   for (const c of clients) {
-    if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+    if (c.authenticated && c.clientType === "app" && c.ws.readyState === WebSocket.OPEN) {
       c.ws.send(json);
     }
   }
@@ -284,10 +272,8 @@ function sendChannelList(client: Client): void {
       id,
       name: info.name,
       agentStatus: info.agentStatus,
-      unread: 0,
       pendingPermission: info.pendingPermission,
     })),
-    mode: currentMode,
   };
   send(client.ws, list);
 }
@@ -298,31 +284,26 @@ function broadcastChannelList(): void {
   }
 }
 
-function broadcastModeChanged(): void {
-  const msg: ModeChanged = { type: "mode_changed", mode: currentMode };
-  broadcast(msg);
-}
-
 function broadcastChannelUpdate(channel: string): void {
   const info = channelRegistry.get(channel);
   if (!info) return;
-  broadcast({
+  const msg: RelayMessage = {
     type: "channel_update",
     channel,
     agentStatus: info.agentStatus,
     pendingPermission: info.pendingPermission,
-  });
+  };
+  broadcastToApps(msg);
+  broadcastToBots(msg);
 }
 
 // --- Start ---
 server.listen(PORT, () => {
   console.log(`[relay] ClaudeBridge Relay on port ${PORT}`);
-  console.log(`[relay] DB: ${DB_PATH}`);
 });
 
 const shutdown = () => {
   console.log("[relay] Shutting down...");
-  store.close();
   wss.close();
   server.close();
   process.exit(0);

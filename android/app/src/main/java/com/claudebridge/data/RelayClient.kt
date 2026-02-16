@@ -12,11 +12,11 @@ class RelayClient(
     interface Listener {
         fun onConnected()
         fun onDisconnected()
-        fun onChannelList(channels: List<Channel>, mode: String)
+        fun onChannelList(channels: List<Channel>)
         fun onChannelUpdate(channelId: String, agentStatus: String?, pendingPermission: Boolean?)
-        fun onModeChanged(mode: String)
-        fun onMessage(message: ChatMessage)
-        fun onHistory(channelId: String, messages: List<ChatMessage>, hasMore: Boolean)
+        fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>)
+        fun onBufferSync(channel: String, data: String)
+        fun onPing(pingId: String)
         fun onError(error: String)
     }
 
@@ -33,7 +33,6 @@ class RelayClient(
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                // Send auth
                 val auth = JSONObject().apply {
                     put("type", "auth")
                     put("token", authToken)
@@ -66,40 +65,20 @@ class RelayClient(
         connected = false
     }
 
-    fun sendMessage(channel: String, content: String) {
+    /** Send input from phone to PTY proxy via relay. */
+    fun sendPtyInput(channel: String, data: String) {
         val msg = JSONObject().apply {
-            put("type", "send")
+            put("type", "pty_input")
             put("channel", channel)
-            put("content", content)
+            put("data", data)
         }
         webSocket?.send(msg.toString())
     }
 
-    fun sendPermissionResponse(channel: String, requestId: String, approved: Boolean, message: String? = null) {
+    fun sendPong(pingId: String) {
         val msg = JSONObject().apply {
-            put("type", "permission_response")
-            put("channel", channel)
-            put("requestId", requestId)
-            put("approved", approved)
-            if (message != null) put("message", message)
-        }
-        webSocket?.send(msg.toString())
-    }
-
-    fun sendSetMode(mode: String) {
-        val msg = JSONObject().apply {
-            put("type", "set_mode")
-            put("mode", mode)
-        }
-        webSocket?.send(msg.toString())
-    }
-
-    fun requestHistory(channel: String, limit: Int = 50, before: Long? = null) {
-        val msg = JSONObject().apply {
-            put("type", "history")
-            put("channel", channel)
-            put("limit", limit)
-            if (before != null) put("before", before)
+            put("type", "pong")
+            put("pingId", pingId)
         }
         webSocket?.send(msg.toString())
     }
@@ -109,7 +88,7 @@ class RelayClient(
     // --- Private ---
 
     private fun handleMessage(json: JSONObject) {
-        when (json.getString("type")) {
+        when (json.optString("type")) {
             "auth_result" -> {
                 if (json.getBoolean("success")) {
                     connected = true
@@ -121,13 +100,7 @@ class RelayClient(
 
             "channel_list" -> {
                 val channels = parseChannelList(json.getJSONArray("channels"))
-                val mode = json.optString("mode", "desktop")
-                listener?.onChannelList(channels, mode)
-            }
-
-            "mode_changed" -> {
-                val mode = json.getString("mode")
-                listener?.onModeChanged(mode)
+                listener?.onChannelList(channels)
             }
 
             "channel_update" -> {
@@ -138,20 +111,38 @@ class RelayClient(
                 )
             }
 
-            "message" -> {
-                val msg = parseChatMessage(json)
-                listener?.onMessage(msg)
+            "pty_output" -> {
+                val options = mutableListOf<PermissionOption>()
+                val optionsArr = json.optJSONArray("permissionOptions")
+                if (optionsArr != null) {
+                    for (i in 0 until optionsArr.length()) {
+                        val opt = optionsArr.getJSONObject(i)
+                        options.add(PermissionOption(
+                            number = opt.getString("number"),
+                            label = opt.getString("label")
+                        ))
+                    }
+                }
+                listener?.onPtyOutput(
+                    json.getString("channel"),
+                    json.getString("data"),
+                    json.optBoolean("isPermission", false),
+                    options
+                )
             }
 
-            "history_response" -> {
-                val messages = json.getJSONArray("messages").let { arr ->
-                    (0 until arr.length()).map { parseChatMessage(arr.getJSONObject(it)) }
-                }
-                listener?.onHistory(
+            "buffer_sync" -> {
+                listener?.onBufferSync(
                     json.getString("channel"),
-                    messages,
-                    json.getBoolean("hasMore")
+                    json.getString("data")
                 )
+            }
+
+            "ping" -> {
+                val pingId = json.getString("pingId")
+                // Auto-respond with pong
+                sendPong(pingId)
+                listener?.onPing(pingId)
             }
 
             "error" -> listener?.onError(json.getString("message"))
@@ -165,26 +156,8 @@ class RelayClient(
                 id = obj.getString("id"),
                 name = obj.getString("name"),
                 agentStatus = obj.optString("agentStatus", "idle"),
-                unread = obj.optInt("unread", 0),
                 pendingPermission = obj.optBoolean("pendingPermission", false)
             )
         }
-    }
-
-    private fun parseChatMessage(json: JSONObject): ChatMessage {
-        val metadata = json.optJSONObject("metadata")
-        val permReq = metadata?.optJSONObject("permissionRequest")
-        val needsAttention = metadata?.optBoolean("needsAttention", false) ?: false
-
-        return ChatMessage(
-            id = json.getLong("id"),
-            channel = json.getString("channel"),
-            sender = json.getString("sender"),
-            content = json.getString("content"),
-            timestamp = json.getLong("timestamp"),
-            needsAttention = needsAttention,
-            permissionRequestId = permReq?.optString("requestId"),
-            toolName = permReq?.optString("toolName")
-        )
     }
 }

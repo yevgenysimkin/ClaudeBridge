@@ -53,20 +53,8 @@ class RelayService : Service(), RelayClient.Listener {
 
     // --- Public API (via binder) ---
 
-    fun sendMessage(channel: String, content: String) {
-        relayClient?.sendMessage(channel, content)
-    }
-
-    fun sendPermissionResponse(channel: String, requestId: String, approved: Boolean, message: String? = null) {
-        relayClient?.sendPermissionResponse(channel, requestId, approved, message)
-    }
-
-    fun requestHistory(channel: String, limit: Int = 50, before: Long? = null) {
-        relayClient?.requestHistory(channel, limit, before)
-    }
-
-    fun setMode(mode: String) {
-        relayClient?.sendSetMode(mode)
+    fun sendPtyInput(channel: String, data: String) {
+        relayClient?.sendPtyInput(channel, data)
     }
 
     val isConnected: Boolean get() = relayClient?.isConnected ?: false
@@ -84,28 +72,31 @@ class RelayService : Service(), RelayClient.Listener {
         updateConnectionNotification("Disconnected")
     }
 
-    override fun onChannelList(channels: List<Channel>, mode: String) {
+    override fun onChannelList(channels: List<Channel>) {
         BridgeState.setChannels(channels)
-        BridgeState.setMode(mode)
-    }
-
-    override fun onModeChanged(mode: String) {
-        BridgeState.setMode(mode)
     }
 
     override fun onChannelUpdate(channelId: String, agentStatus: String?, pendingPermission: Boolean?) {
         BridgeState.updateChannel(channelId, agentStatus, pendingPermission)
     }
 
-    override fun onMessage(message: ChatMessage) {
-        BridgeState.addMessage(message)
-        if (message.needsAttention) {
-            fireAttentionNotification(message)
+    override fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>) {
+        BridgeState.appendOutput(channel, data)
+        if (isPermission) {
+            BridgeState.setActivePermission(channel)
+            if (permissionOptions.isNotEmpty()) {
+                BridgeState.setPermissionOptions(permissionOptions)
+            }
+            fireAttentionNotification(channel, data)
         }
     }
 
-    override fun onHistory(channelId: String, messages: List<ChatMessage>, hasMore: Boolean) {
-        BridgeState.setHistory(channelId, messages)
+    override fun onBufferSync(channel: String, data: String) {
+        BridgeState.setBuffer(channel, data)
+    }
+
+    override fun onPing(pingId: String) {
+        // Pong is auto-sent by RelayClient — nothing to do here
     }
 
     override fun onError(error: String) {
@@ -150,33 +141,27 @@ class RelayService : Service(), RelayClient.Listener {
         nm.notify(NOTIFICATION_ID_CONNECTION, buildConnectionNotification(status))
     }
 
-    private fun fireAttentionNotification(message: ChatMessage) {
+    private fun fireAttentionNotification(channel: String, data: String) {
         val tapIntent = Intent(this, MainActivity::class.java).apply {
-            putExtra(EXTRA_CHANNEL, message.channel)
+            putExtra(EXTRA_CHANNEL, channel)
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pendingTap = PendingIntent.getActivity(
-            this, message.id.toInt(), tapIntent,
+            this, channel.hashCode(), tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val title = if (message.permissionRequestId != null) {
-            "Permission: ${message.toolName ?: "unknown tool"}"
-        } else {
-            "Attention needed"
-        }
-
         val notification = NotificationCompat.Builder(this, ClaudeBridgeApp.CHANNEL_ATTENTION)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
-            .setContentText(message.content.take(200))
+            .setContentTitle("Permission Request")
+            .setContentText(data.take(200))
             .setContentIntent(pendingTap)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
 
         val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIFICATION_ID_ATTENTION_BASE + message.id.toInt(), notification)
+        nm.notify(NOTIFICATION_ID_ATTENTION_BASE + channel.hashCode(), notification)
     }
 
     companion object {

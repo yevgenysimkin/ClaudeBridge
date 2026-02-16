@@ -1,7 +1,7 @@
 /**
  * ClaudeBridge Relay Protocol
  *
- * Shared message types between relay, bot, and Android app.
+ * Shared message types between PTY proxy, relay, and Android app.
  * All messages are JSON over WebSocket.
  */
 
@@ -14,31 +14,7 @@ export interface AuthMessage {
   clientType: "bot" | "app";
 }
 
-/** Send a chat message to a channel (user → agent, or agent → user). */
-export interface SendMessage {
-  type: "send";
-  channel: string;
-  content: string;
-}
-
-/** Respond to a permission prompt. */
-export interface PermissionResponse {
-  type: "permission_response";
-  channel: string;
-  requestId: string;
-  approved: boolean;
-  message?: string; // denial reason or AskUserQuestion answer
-}
-
-/** Request message history for a channel. */
-export interface HistoryRequest {
-  type: "history";
-  channel: string;
-  limit?: number;
-  before?: number; // timestamp
-}
-
-/** Bot registers/updates a channel (agent). */
+/** Bot (PTY proxy) registers/updates a channel. */
 export interface RegisterChannel {
   type: "register_channel";
   channel: string;
@@ -46,28 +22,55 @@ export interface RegisterChannel {
   agentStatus: "running" | "stopped" | "idle";
 }
 
-/** Bot sends a message with metadata (permission request, tool use, result). */
-export interface BotMessage {
-  type: "bot_message";
+/** Remove a channel from the registry. */
+export interface RemoveChannel {
+  type: "remove_channel";
   channel: string;
-  content: string;
-  metadata?: MessageMetadata;
 }
 
-/** App sets the global mode (phone or desktop). */
-export interface SetMode {
-  type: "set_mode";
-  mode: "phone" | "desktop";
+/** Parsed permission option from a numbered Claude Code prompt. */
+export interface PermissionOption {
+  number: string;
+  label: string;
+}
+
+/** PTY proxy → relay → app: terminal output chunk. */
+export interface PtyOutput {
+  type: "pty_output";
+  channel: string;
+  data: string;
+  timestamp: number;
+  isPermission?: boolean;
+  permissionOptions?: PermissionOption[];
+}
+
+/** App → relay → PTY proxy: user input from phone. */
+export interface PtyInput {
+  type: "pty_input";
+  channel: string;
+  data: string;
+}
+
+/** Ping to verify app connectivity. */
+export interface Ping {
+  type: "ping";
+  pingId: string;
+}
+
+/** Pong auto-response. */
+export interface Pong {
+  type: "pong";
+  pingId: string;
 }
 
 export type ClientMessage =
   | AuthMessage
-  | SendMessage
-  | PermissionResponse
-  | HistoryRequest
   | RegisterChannel
-  | BotMessage
-  | SetMode;
+  | RemoveChannel
+  | PtyOutput
+  | PtyInput
+  | Ping
+  | Pong;
 
 // --- Relay → Client ---
 
@@ -78,48 +81,6 @@ export interface AuthResult {
   error?: string;
 }
 
-/** A message in a channel. */
-export interface ChannelMessage {
-  type: "message";
-  id: number;
-  channel: string;
-  sender: "bot" | "user" | "system";
-  content: string;
-  timestamp: number;
-  metadata?: MessageMetadata;
-}
-
-export interface MessageMetadata {
-  /** For permission requests */
-  permissionRequest?: {
-    requestId: string;
-    toolName: string;
-    toolInput: Record<string, unknown>;
-  };
-  /** For user questions from agent */
-  userQuestion?: {
-    requestId: string;
-    questions: Array<{
-      question: string;
-      options: Array<{ label: string; description?: string }>;
-    }>;
-  };
-  /** For result messages */
-  result?: {
-    success: boolean;
-    costUsd?: number;
-    durationMs?: number;
-    numTurns?: number;
-  };
-  /** For tool-use notifications */
-  toolUse?: {
-    toolName: string;
-    summary: string;
-  };
-  /** Whether this message needs user attention (permission, question) */
-  needsAttention?: boolean;
-}
-
 /** List of available channels (sent after auth). */
 export interface ChannelList {
   type: "channel_list";
@@ -127,10 +88,8 @@ export interface ChannelList {
     id: string;
     name: string;
     agentStatus: "running" | "stopped" | "idle";
-    unread: number;
     pendingPermission: boolean;
   }>;
-  mode: "phone" | "desktop";
 }
 
 /** Channel status update. */
@@ -142,18 +101,12 @@ export interface ChannelUpdate {
   pendingPermission?: boolean;
 }
 
-/** Message history response. */
-export interface HistoryResponse {
-  type: "history_response";
+/** Full buffer catch-up for reconnecting clients. */
+export interface BufferSync {
+  type: "buffer_sync";
   channel: string;
-  messages: ChannelMessage[];
-  hasMore: boolean;
-}
-
-/** Broadcast when global mode changes. */
-export interface ModeChanged {
-  type: "mode_changed";
-  mode: "phone" | "desktop";
+  data: string;
+  timestamp: number;
 }
 
 /** Error from relay. */
@@ -164,9 +117,11 @@ export interface RelayError {
 
 export type RelayMessage =
   | AuthResult
-  | ChannelMessage
   | ChannelList
   | ChannelUpdate
-  | ModeChanged
-  | HistoryResponse
+  | PtyOutput
+  | PtyInput
+  | BufferSync
+  | Ping
+  | Pong
   | RelayError;

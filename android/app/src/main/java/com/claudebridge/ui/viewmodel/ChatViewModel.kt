@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * ViewModel for the chat UI. Binds to RelayService and delegates
+ * ViewModel for the terminal UI. Binds to RelayService and delegates
  * all state observation to BridgeState.
  */
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -28,9 +28,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // Delegate to BridgeState
     val connected = BridgeState.connected
-    val mode = BridgeState.mode
     val channels = BridgeState.channels
-    val messages = BridgeState.messages
+    val buffers = BridgeState.buffers
+    val activePermission = BridgeState.activePermission
+    val permissionOptions = BridgeState.permissionOptions
+    val displayBuffers = BridgeState.displayBuffers
     val error = BridgeState.error
 
     private val connection = object : ServiceConnection {
@@ -56,7 +58,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         ctx.startForegroundService(intent)
 
-        // Also bind so we can call methods
         ctx.bindService(
             Intent(ctx, RelayService::class.java),
             connection,
@@ -76,29 +77,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectChannel(channelId: String?) {
         _currentChannel.value = channelId
-        if (channelId != null) {
-            service?.requestHistory(channelId)
-        }
     }
 
-    fun sendMessage(content: String) {
+    /** Send text input from phone to the PTY proxy. */
+    fun sendInput(text: String) {
         val channel = _currentChannel.value ?: return
-        service?.sendMessage(channel, content)
+        service?.sendPtyInput(channel, text + "\n")
     }
 
-    fun approvePermission(channel: String, requestId: String) {
-        service?.sendPermissionResponse(channel, requestId, approved = true)
+    /** Send raw keystrokes (e.g., "y\n" for permission approval). */
+    fun sendRaw(channel: String, data: String) {
+        service?.sendPtyInput(channel, data)
+        BridgeState.setActivePermission(null)
     }
 
-    fun denyPermission(channel: String, requestId: String, reason: String? = null) {
-        service?.sendPermissionResponse(channel, requestId, approved = false, message = reason)
+    /** Select a numbered permission option (sends the digit + newline). */
+    fun selectOption(channel: String, optionNumber: String) {
+        service?.sendPtyInput(channel, "$optionNumber\n")
+        BridgeState.setActivePermission(null)
     }
 
-    fun toggleMode() {
-        val newMode = if (BridgeState.mode.value == "phone") "desktop" else "phone"
-        service?.setMode(newMode)
-        // Optimistic update — relay will broadcast confirmation
-        BridgeState.setMode(newMode)
+    /** Send ESC key to interrupt Claude. */
+    fun sendEsc(channel: String) {
+        service?.sendPtyInput(channel, "\u001b")
+    }
+
+    /** Clear the display buffer. Old messages stay suppressed via seen hashes. */
+    fun clearBuffer(channel: String) {
+        BridgeState.clearBuffer(channel)
+    }
+
+    fun refresh() {
+        stopConnection()
+        startConnection()
     }
 
     private fun unbind() {

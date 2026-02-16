@@ -1,24 +1,20 @@
 package com.claudebridge.ui.screen
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.claudebridge.data.Channel
@@ -29,8 +25,7 @@ import com.claudebridge.ui.theme.*
 fun ChannelListScreen(
     channels: List<Channel>,
     connected: Boolean,
-    mode: String,
-    onModeToggle: () -> Unit,
+    onRefresh: () -> Unit,
     onChannelClick: (String) -> Unit,
     onSettingsClick: () -> Unit
 ) {
@@ -45,6 +40,9 @@ fun ChannelListScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onRefresh) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                    }
                     IconButton(onClick = onSettingsClick) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
@@ -60,15 +58,6 @@ fun ChannelListScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // --- Mode Toggle ---
-            if (connected) {
-                ModeToggle(
-                    isPhoneMode = mode == "phone",
-                    onToggle = onModeToggle
-                )
-            }
-
-            // --- Channel List ---
             if (channels.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -92,55 +81,6 @@ fun ChannelListScreen(
 }
 
 @Composable
-private fun ModeToggle(isPhoneMode: Boolean, onToggle: () -> Unit) {
-    val backgroundColor by animateColorAsState(
-        targetValue = if (isPhoneMode) ModePhone.copy(alpha = 0.15f) else ClaudeSurfaceVariant,
-        label = "modeBg"
-    )
-    val accentColor by animateColorAsState(
-        targetValue = if (isPhoneMode) ModePhone else ModeDesktop,
-        label = "modeAccent"
-    )
-
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        shape = RoundedCornerShape(16.dp),
-        color = backgroundColor,
-        onClick = onToggle
-    ) {
-        Row(
-            modifier = Modifier
-                .padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .clip(CircleShape)
-                    .background(accentColor)
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = if (isPhoneMode) "PHONE" else "DESKTOP",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = accentColor,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = if (isPhoneMode) "Permissions route to phone" else "Permissions at terminal",
-                fontSize = 13.sp,
-                color = ClaudeOnSurface.copy(alpha = 0.7f)
-            )
-        }
-    }
-}
-
-@Composable
 private fun ChannelRow(channel: Channel, onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -149,7 +89,6 @@ private fun ChannelRow(channel: Channel, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Agent status indicator
         Box(
             modifier = Modifier
                 .size(10.dp)
@@ -185,13 +124,6 @@ private fun ChannelRow(channel: Channel, onClick: () -> Unit) {
                 contentColor = ClaudeBackground
             ) {
                 Text("!", fontWeight = FontWeight.Bold)
-            }
-        } else if (channel.unread > 0) {
-            Badge(
-                containerColor = ClaudePrimary,
-                contentColor = ClaudeBackground
-            ) {
-                Text("${channel.unread}")
             }
         }
     }
