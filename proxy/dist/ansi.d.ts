@@ -19,8 +19,12 @@ export interface PermissionInfo {
  *
  * Detection triggers if a known pattern matches OR if 2+ numbered options
  * are found (the options themselves are evidence of an interactive prompt).
+ *
+ * @param data - Terminal text to scan
+ * @param preStripped - If true, skip ANSI stripping (caller already provided clean text,
+ *                      e.g. from a virtual terminal's rendered screen buffer)
  */
-export declare function detectPermission(data: string): PermissionInfo;
+export declare function detectPermission(data: string, preStripped?: boolean): PermissionInfo;
 /** Check if terminal output contains a permission prompt (backward compat). */
 export declare function isPermissionPrompt(data: string): boolean;
 //# sourceMappingURL=ansi.d.ts.map

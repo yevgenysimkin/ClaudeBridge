@@ -19,6 +19,10 @@ object BridgeState {
     val buffers: StateFlow<Map<String, String>> = _buffers
 
 
+    // channelId → latest vterm-rendered screen text (replace, not append)
+    private val _screenTexts = MutableStateFlow<Map<String, String>>(emptyMap())
+    val screenTexts: StateFlow<Map<String, String>> = _screenTexts
+
     // channelId of channel with active permission prompt
     private val _activePermission = MutableStateFlow<String?>(null)
     val activePermission: StateFlow<String?> = _activePermission
@@ -80,6 +84,12 @@ object BridgeState {
         _buffers.value = current
     }
 
+    fun setScreenText(channelId: String, text: String) {
+        val current = _screenTexts.value.toMutableMap()
+        current[channelId] = text
+        _screenTexts.value = current
+    }
+
     fun setActivePermission(channelId: String?) {
         _activePermission.value = channelId
         if (channelId == null) {
@@ -118,6 +128,25 @@ object BridgeState {
         _displayBuffers.value = current
     }
 
+    /** Remove a channel and all its associated state. */
+    fun removeChannel(channelId: String) {
+        _channels.value = _channels.value.filter { it.id != channelId }
+        val bufCurrent = _buffers.value.toMutableMap()
+        bufCurrent.remove(channelId)
+        _buffers.value = bufCurrent
+        val screenCurrent = _screenTexts.value.toMutableMap()
+        screenCurrent.remove(channelId)
+        _screenTexts.value = screenCurrent
+        val dispCurrent = _displayBuffers.value.toMutableMap()
+        dispCurrent.remove(channelId)
+        _displayBuffers.value = dispCurrent
+        seenHashes.remove(channelId)
+        if (_activePermission.value == channelId) {
+            _activePermission.value = null
+            _permissionOptions.value = emptyList()
+        }
+    }
+
     fun setError(err: String?) {
         _error.value = err
     }
@@ -126,6 +155,7 @@ object BridgeState {
         _connected.value = false
         _channels.value = emptyList()
         _buffers.value = emptyMap()
+        _screenTexts.value = emptyMap()
         _activePermission.value = null
         _permissionOptions.value = emptyList()
         _error.value = null

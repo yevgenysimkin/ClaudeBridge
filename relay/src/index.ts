@@ -25,6 +25,7 @@ interface Client {
   ws: WebSocket;
   clientType: "bot" | "app";
   authenticated: boolean;
+  ownedChannels: Set<string>;
 }
 
 const clients = new Set<Client>();
@@ -57,7 +58,7 @@ const server = createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws) => {
-  const client: Client = { ws, clientType: "app", authenticated: false };
+  const client: Client = { ws, clientType: "app", authenticated: false, ownedChannels: new Set() };
   clients.add(client);
 
   const authTimer = setTimeout(() => {
@@ -88,7 +89,7 @@ wss.on("connection", (ws) => {
 
     switch (msg.type) {
       case "register_channel":
-        handleRegisterChannel(msg.channel, msg.name, msg.agentStatus);
+        handleRegisterChannel(client, msg.channel, msg.name, msg.agentStatus);
         break;
       case "remove_channel":
         handleRemoveChannel(msg.channel);
@@ -113,6 +114,17 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     clients.delete(client);
     clearTimeout(authTimer);
+
+    // Auto-cleanup: remove channels owned by this bot
+    if (client.clientType === "bot" && client.ownedChannels.size > 0) {
+      for (const channel of client.ownedChannels) {
+        channelRegistry.delete(channel);
+        channelBuffers.delete(channel);
+        console.log(`[relay] Auto-removed channel: ${channel} (bot disconnected)`);
+      }
+      broadcastChannelList();
+    }
+
     console.log(`[relay] ${client.clientType} disconnected. Clients: ${clients.size}`);
   });
 
@@ -150,7 +162,8 @@ function handleAuth(client: Client, msg: AuthMessage): void {
   console.log(`[relay] ${msg.clientType} authenticated. Clients: ${clients.size}`);
 }
 
-function handleRegisterChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
+function handleRegisterChannel(client: Client, channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
+  client.ownedChannels.add(channel);
   const existing = channelRegistry.get(channel);
   if (existing) {
     existing.name = name;

@@ -57,6 +57,10 @@ class RelayService : Service(), RelayClient.Listener {
         relayClient?.sendPtyInput(channel, data)
     }
 
+    fun removeChannel(channel: String) {
+        relayClient?.removeChannel(channel)
+    }
+
     val isConnected: Boolean get() = relayClient?.isConnected ?: false
 
     // --- RelayClient.Listener ---
@@ -80,14 +84,20 @@ class RelayService : Service(), RelayClient.Listener {
         BridgeState.updateChannel(channelId, agentStatus, pendingPermission)
     }
 
-    override fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>) {
+    override fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>, screenText: String) {
         BridgeState.appendOutput(channel, data)
+        if (screenText.isNotEmpty()) {
+            BridgeState.setScreenText(channel, screenText)
+        }
         if (isPermission) {
             BridgeState.setActivePermission(channel)
             if (permissionOptions.isNotEmpty()) {
                 BridgeState.setPermissionOptions(permissionOptions)
             }
             fireAttentionNotification(channel, data)
+        } else if (BridgeState.activePermission.value == channel) {
+            // Question was answered from the local terminal — clear permission UI
+            BridgeState.setActivePermission(null)
         }
     }
 

@@ -6,6 +6,8 @@ import { appendFileSync } from "node:fs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "../../.env") });
 import * as pty from "node-pty";
+import xtermHeadless from "@xterm/headless";
+const { Terminal } = xtermHeadless;
 import { loadEnvConfig } from "./config.js";
 import { RelayClient } from "./relay-client.js";
 import { detectPermission } from "./ansi.js";
@@ -34,6 +36,7 @@ function resolveCommand(cmd) {
 }
 // --- State ---
 const ringBuffer = [];
+let activePermOptionCount = 0; // Number of parsed options in the current multi-option prompt (0 = none)
 const GENERIC_DIRS = new Set([
     "src", "bot", "app", "lib", "dist", "build", "test", "tests",
     "scripts", "config", "res", "main", "proxy",
@@ -62,10 +65,34 @@ async function main() {
     relay.onMessage((msg) => {
         if (msg.type === "pty_input" && msg.channel === SESSION_ID && proc) {
             const raw = msg.data;
-            log(`Phone input: ${JSON.stringify(raw)}`);
-            // Claude Code's TUI needs text and Enter as separate writes.
+            log(`Phone input: ${JSON.stringify(raw)}, activePermOptionCount=${activePermOptionCount}`);
             const body = raw.replace(/\n$/, "");
             const hasNewline = raw.endsWith("\n");
+            // Check if this is free text during a multi-option TUI selection widget.
+            // Arrow-key sequences (from selectOption) start with \x1b[ — let those through directly.
+            // Anything else is free text that needs TUI navigation to "Type something" first.
+            const isArrowNavigation = body.startsWith("\x1b[");
+            if (activePermOptionCount > 0 && !isArrowNavigation && body.length > 0) {
+                // Navigate to "Type something" (position = optionCount + 1), select it,
+                // then type the text — each step needs a delay for the TUI to process.
+                const ARROW_DOWN = "\x1b[B";
+                const downArrows = ARROW_DOWN.repeat(activePermOptionCount);
+                log(`TUI nav: sending ${activePermOptionCount} down-arrows, Enter, then text`);
+                proc.write(downArrows);
+                setTimeout(() => {
+                    proc?.write("\r"); // Enter to select "Type something"
+                    setTimeout(() => {
+                        if (body.length > 0)
+                            proc?.write(body);
+                        if (hasNewline) {
+                            setTimeout(() => proc?.write("\r"), 50);
+                        }
+                    }, 100); // Wait for text input mode to activate
+                }, 50); // Wait for arrows to be processed
+                activePermOptionCount = 0;
+                return;
+            }
+            // Standard input: text + Enter as separate writes
             if (body.length > 0) {
                 proc.write(body);
             }
@@ -112,28 +139,54 @@ async function main() {
             COLORTERM: "truecolor",
         },
     });
+    // --- Virtual terminal for permission detection ---
+    // Claude Code's TUI uses cursor positioning to paint the screen. Raw ANSI stripping
+    // destroys the spatial layout, making regex detection unreliable. Instead, we feed
+    // all output through a headless xterm that interprets cursor moves, then read the
+    // rendered screen buffer as clean lines for detection.
+    const vterm = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
+    /** Read the virtual terminal's visible screen as plain text lines. */
+    function readScreen() {
+        const buf = vterm.buffer.active;
+        const lines = [];
+        for (let i = 0; i < buf.length; i++) {
+            const line = buf.getLine(i);
+            if (line) {
+                lines.push(line.translateToString(true));
+            }
+        }
+        return lines.join("\n");
+    }
     // --- Batched output relay ---
     // Claude Code outputs many small chunks rapidly (escape sequences, partial lines).
     // Batching reduces WebSocket message count from hundreds/sec to ~12/sec.
     let pendingOutput = "";
     let batchTimer = null;
-    const RECENT_CHUNKS_FOR_DETECTION = 5;
     function flushOutput() {
         batchTimer = null;
         if (pendingOutput.length === 0)
             return;
         const data = pendingOutput;
         pendingOutput = "";
-        // Check recent ring buffer for permission prompts
-        const recentOutput = ringBuffer.slice(-RECENT_CHUNKS_FOR_DETECTION).join("");
-        const permInfo = detectPermission(recentOutput);
+        // Read the rendered screen from the virtual terminal
+        const screenText = readScreen();
+        const permInfo = detectPermission(screenText, true);
+        // Track multi-option prompt state for TUI navigation on phone input
+        if (permInfo.detected && permInfo.options.length > 0) {
+            activePermOptionCount = permInfo.options.length;
+        }
+        else if (!permInfo.detected) {
+            activePermOptionCount = 0;
+        }
         if (permInfo.detected) {
             log(`Interactive prompt detected: ${permInfo.options.length} options: ${permInfo.options.map(o => `${o.number}. ${o.label}`).join(", ") || "(binary)"}`);
+            log(`--- SCREEN TEXT ---\n${screenText}\n--- END SCREEN ---`);
         }
         relay.send({
             type: "pty_output",
             channel: SESSION_ID,
             data,
+            screenText,
             timestamp: Date.now(),
             isPermission: permInfo.detected || undefined,
             permissionOptions: permInfo.options.length > 0 ? permInfo.options : undefined,
@@ -142,11 +195,13 @@ async function main() {
     proc.onData((data) => {
         // 1. Always write to local terminal immediately (no delay)
         process.stdout.write(data);
-        // 2. Buffer for reconnecting clients
+        // 2. Feed virtual terminal (for permission detection)
+        vterm.write(data);
+        // 3. Buffer for reconnecting clients
         ringBuffer.push(data);
         if (ringBuffer.length > RING_BUFFER_SIZE)
             ringBuffer.shift();
-        // 3. Batch for relay (reduces WS message flood)
+        // 4. Batch for relay (reduces WS message flood)
         pendingOutput += data;
         if (!batchTimer) {
             batchTimer = setTimeout(flushOutput, OUTPUT_BATCH_MS);
@@ -183,6 +238,7 @@ async function main() {
         const newCols = process.stdout.columns || 120;
         const newRows = process.stdout.rows || 40;
         proc?.resize(newCols, newRows);
+        vterm.resize(newCols, newRows);
     });
     // --- Graceful shutdown ---
     const shutdown = () => {

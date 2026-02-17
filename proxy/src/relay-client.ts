@@ -31,6 +31,7 @@ export class RelayClient {
   private stopping = false;
   private authenticated = false;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private registeredChannel: { channel: string; name: string; agentStatus: "running" | "stopped" | "idle" } | null = null;
 
   constructor(relayUrl: string, authToken: string) {
     // Convert http(s) to ws(s)
@@ -56,8 +57,9 @@ export class RelayClient {
     }
   }
 
-  /** Register a channel with the relay. */
+  /** Register a channel with the relay. Remembers registration for auto-re-register on reconnect. */
   registerChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
+    this.registeredChannel = { channel, name, agentStatus };
     this.send({ type: "register_channel", channel, name, agentStatus });
   }
 
@@ -135,6 +137,12 @@ export class RelayClient {
           this.authenticated = true;
           this.startPing();
           log("Authenticated.");
+          // Re-register channel if we had one (reconnect after relay restart)
+          if (this.registeredChannel) {
+            const { channel, name, agentStatus } = this.registeredChannel;
+            this.send({ type: "register_channel", channel, name, agentStatus });
+            log(`Re-registered channel: ${channel}`);
+          }
         } else {
           log(`Auth failed: ${msg.error}`);
           this.stopping = true;

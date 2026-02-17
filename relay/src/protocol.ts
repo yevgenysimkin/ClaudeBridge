@@ -42,6 +42,8 @@ export interface PtyOutput {
   timestamp: number;
   isPermission?: boolean;
   permissionOptions?: PermissionOption[];
+  /** Rendered screen text from headless vterm — proper line breaks, no ANSI. */
+  screenText?: string;
 }
 
 /** App → relay → PTY proxy: user input from phone. */

@@ -14,6 +14,7 @@ export declare class RelayClient {
     private stopping;
     private authenticated;
     private pingTimer;
+    private registeredChannel;
     constructor(relayUrl: string, authToken: string);
     /** Connect to the relay and authenticate. */
     connect(): void;
@@ -21,7 +22,7 @@ export declare class RelayClient {
     onMessage(handler: RelayMessageHandler): void;
     /** Send a raw JSON message to the relay. */
     send(msg: Record<string, unknown>): void;
-    /** Register a channel with the relay. */
+    /** Register a channel with the relay. Remembers registration for auto-re-register on reconnect. */
     registerChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void;
     /** Whether the client is connected and authenticated. */
     get isConnected(): boolean;

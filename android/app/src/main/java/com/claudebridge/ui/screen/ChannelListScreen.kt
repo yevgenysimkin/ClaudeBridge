@@ -14,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,6 +28,7 @@ fun ChannelListScreen(
     connected: Boolean,
     onRefresh: () -> Unit,
     onChannelClick: (String) -> Unit,
+    onRemoveChannel: (String) -> Unit,
     onSettingsClick: () -> Unit
 ) {
     Scaffold(
@@ -72,10 +74,53 @@ fun ChannelListScreen(
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(channels, key = { it.id }) { channel ->
-                        ChannelRow(channel, onClick = { onChannelClick(channel.id) })
+                        SwipeToDismissChannelRow(
+                            channel = channel,
+                            onClick = { onChannelClick(channel.id) },
+                            onDismiss = { onRemoveChannel(channel.id) }
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeToDismissChannelRow(
+    channel: Channel,
+    onClick: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                onDismiss()
+                true
+            } else {
+                false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        backgroundContent = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFB33A3A))
+                    .padding(horizontal = 20.dp),
+                contentAlignment = Alignment.CenterEnd
+            ) {
+                Text("Remove", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        }
+    ) {
+        Box(modifier = Modifier.background(ClaudeBackground)) {
+            ChannelRow(channel, onClick)
         }
     }
 }

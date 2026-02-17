@@ -19,6 +19,11 @@ import kotlinx.coroutines.flow.StateFlow
  */
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        /** ANSI escape for arrow-down key, used to navigate TUI selection widgets. */
+        private const val ARROW_DOWN = "\u001b[B"
+    }
+
     private val prefs = Preferences(application)
     private var service: RelayService? = null
     private var bound = false
@@ -32,6 +37,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val buffers = BridgeState.buffers
     val activePermission = BridgeState.activePermission
     val permissionOptions = BridgeState.permissionOptions
+    val screenTexts = BridgeState.screenTexts
     val displayBuffers = BridgeState.displayBuffers
     val error = BridgeState.error
 
@@ -91,9 +97,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         BridgeState.setActivePermission(null)
     }
 
-    /** Select a numbered permission option (sends the digit + newline). */
+    /** Select a numbered permission option by navigating the TUI selection widget. */
     fun selectOption(channel: String, optionNumber: String) {
-        service?.sendPtyInput(channel, "$optionNumber\n")
+        // Claude Code's TUI uses arrow-key navigation, not digit keys.
+        // Cursor starts at option 1, so we need (N-1) down-arrows then Enter.
+        val n = optionNumber.toIntOrNull() ?: 1
+        val downArrows = ARROW_DOWN.repeat((n - 1).coerceAtLeast(0))
+        service?.sendPtyInput(channel, downArrows + "\n")
         BridgeState.setActivePermission(null)
     }
 
@@ -105,6 +115,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /** Clear the display buffer. Old messages stay suppressed via seen hashes. */
     fun clearBuffer(channel: String) {
         BridgeState.clearBuffer(channel)
+    }
+
+    /** Remove a channel from the relay (manual cleanup). */
+    fun removeChannel(channelId: String) {
+        service?.removeChannel(channelId)
+        BridgeState.removeChannel(channelId)
+        if (_currentChannel.value == channelId) {
+            _currentChannel.value = null
+        }
     }
 
     fun refresh() {

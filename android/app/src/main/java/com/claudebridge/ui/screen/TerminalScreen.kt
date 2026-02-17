@@ -182,6 +182,7 @@ fun TerminalScreen(
     channelName: String,
     channelId: String,
     buffer: String,
+    screenText: String,
     displayBuffer: String,
     hasPermission: Boolean,
     permissionOptions: List<PermissionOption>,
@@ -197,9 +198,11 @@ fun TerminalScreen(
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
 
-    // Extract new messages from raw buffer and write to display buffer (once per message)
-    LaunchedEffect(buffer) {
-        val extracted = extractMessages(buffer)
+    // Extract new messages from screenText (vterm-rendered, proper line breaks) when available,
+    // falling back to raw buffer for reconnect scenarios (buffer_sync has no screenText).
+    val extractionSource = if (screenText.isNotEmpty()) screenText else buffer
+    LaunchedEffect(extractionSource) {
+        val extracted = extractMessages(extractionSource)
         for (msg in extracted.messages) {
             com.claudebridge.data.BridgeState.appendIfNew(channelId, msg)
         }

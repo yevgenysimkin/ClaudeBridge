@@ -58,6 +58,7 @@ fun ClaudeBridgeNavHost() {
     val connected by vm.connected.collectAsState()
     val channels by vm.channels.collectAsState()
     val buffers by vm.buffers.collectAsState()
+    val screenTexts by vm.screenTexts.collectAsState()
     val displayBuffers by vm.displayBuffers.collectAsState()
     val activePermission by vm.activePermission.collectAsState()
     val permissionOptions by vm.permissionOptions.collectAsState()
@@ -80,6 +81,7 @@ fun ClaudeBridgeNavHost() {
                     vm.selectChannel(channelId)
                     navController.navigate("terminal/$channelId")
                 },
+                onRemoveChannel = { channelId -> vm.removeChannel(channelId) },
                 onSettingsClick = {
                     navController.navigate("settings")
                 }
@@ -95,6 +97,7 @@ fun ClaudeBridgeNavHost() {
                 channelName = channel?.name ?: channelId,
                 channelId = channelId,
                 buffer = buffer,
+                screenText = screenTexts[channelId] ?: "",
                 displayBuffer = displayBuffers[channelId] ?: "",
                 hasPermission = activePermission == channelId,
                 permissionOptions = if (activePermission == channelId) permissionOptions else emptyList(),

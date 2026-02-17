@@ -14,7 +14,7 @@ class RelayClient(
         fun onDisconnected()
         fun onChannelList(channels: List<Channel>)
         fun onChannelUpdate(channelId: String, agentStatus: String?, pendingPermission: Boolean?)
-        fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>)
+        fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>, screenText: String)
         fun onBufferSync(channel: String, data: String)
         fun onPing(pingId: String)
         fun onError(error: String)
@@ -75,6 +75,15 @@ class RelayClient(
         webSocket?.send(msg.toString())
     }
 
+    /** Ask the relay to remove a channel (manual cleanup from phone). */
+    fun removeChannel(channel: String) {
+        val msg = JSONObject().apply {
+            put("type", "remove_channel")
+            put("channel", channel)
+        }
+        webSocket?.send(msg.toString())
+    }
+
     fun sendPong(pingId: String) {
         val msg = JSONObject().apply {
             put("type", "pong")
@@ -127,7 +136,8 @@ class RelayClient(
                     json.getString("channel"),
                     json.getString("data"),
                     json.optBoolean("isPermission", false),
-                    options
+                    options,
+                    json.optString("screenText", "")
                 )
             }
 

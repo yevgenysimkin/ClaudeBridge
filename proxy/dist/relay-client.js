@@ -24,6 +24,7 @@ export class RelayClient {
     stopping = false;
     authenticated = false;
     pingTimer = null;
+    registeredChannel = null;
     constructor(relayUrl, authToken) {
         // Convert http(s) to ws(s)
         this.relayUrl = relayUrl.replace(/^http/, "ws");
@@ -44,8 +45,9 @@ export class RelayClient {
             this.ws.send(JSON.stringify(msg));
         }
     }
-    /** Register a channel with the relay. */
+    /** Register a channel with the relay. Remembers registration for auto-re-register on reconnect. */
     registerChannel(channel, name, agentStatus) {
+        this.registeredChannel = { channel, name, agentStatus };
         this.send({ type: "register_channel", channel, name, agentStatus });
     }
     /** Whether the client is connected and authenticated. */
@@ -116,6 +118,12 @@ export class RelayClient {
                     this.authenticated = true;
                     this.startPing();
                     log("Authenticated.");
+                    // Re-register channel if we had one (reconnect after relay restart)
+                    if (this.registeredChannel) {
+                        const { channel, name, agentStatus } = this.registeredChannel;
+                        this.send({ type: "register_channel", channel, name, agentStatus });
+                        log(`Re-registered channel: ${channel}`);
+                    }
                 }
                 else {
                     log(`Auth failed: ${msg.error}`);
