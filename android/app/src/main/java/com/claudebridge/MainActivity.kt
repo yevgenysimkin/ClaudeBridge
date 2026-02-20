@@ -14,9 +14,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.claudebridge.data.ChromatticaApi
+import com.claudebridge.data.ConfigRefreshResult
 import com.claudebridge.data.Preferences
 import com.claudebridge.ui.screen.ChannelListScreen
-import com.claudebridge.ui.screen.TerminalScreen
+import com.claudebridge.ui.screen.WebViewSessionScreen
 import com.claudebridge.ui.screen.SettingsScreen
 import com.claudebridge.ui.theme.ClaudeBridgeTheme
 import com.claudebridge.ui.viewmodel.ChatViewModel
@@ -57,15 +59,25 @@ fun ClaudeBridgeNavHost() {
 
     val connected by vm.connected.collectAsState()
     val channels by vm.channels.collectAsState()
-    val buffers by vm.buffers.collectAsState()
-    val screenTexts by vm.screenTexts.collectAsState()
-    val displayBuffers by vm.displayBuffers.collectAsState()
-    val activePermission by vm.activePermission.collectAsState()
-    val permissionOptions by vm.permissionOptions.collectAsState()
+    val messages by vm.messages.collectAsState()
+    val pendingPermission by vm.pendingPermission.collectAsState()
+    val streamingText by vm.streamingText.collectAsState()
     val currentChannel by vm.currentChannel.collectAsState()
 
-    // Auto-connect on launch if configured
+    // Refresh config from server on launch, then auto-connect
     LaunchedEffect(Unit) {
+        if (prefs.isLoggedIn) {
+            when (val result = ChromatticaApi.refreshConfig(prefs.sessionToken)) {
+                is ConfigRefreshResult.Success -> {
+                    prefs.relayUrl = result.relayUrl
+                    prefs.authToken = result.relayAuthToken
+                }
+                is ConfigRefreshResult.SessionExpired -> {
+                    prefs.clear()  // Force re-login
+                }
+                else -> { /* Error — keep existing values */ }
+            }
+        }
         if (prefs.isConfigured) {
             vm.startConnection()
         }
@@ -79,7 +91,7 @@ fun ClaudeBridgeNavHost() {
                 onRefresh = { vm.refresh() },
                 onChannelClick = { channelId ->
                     vm.selectChannel(channelId)
-                    navController.navigate("terminal/$channelId")
+                    navController.navigate("session/$channelId")
                 },
                 onRemoveChannel = { channelId -> vm.removeChannel(channelId) },
                 onSettingsClick = {
@@ -88,29 +100,19 @@ fun ClaudeBridgeNavHost() {
             )
         }
 
-        composable("terminal/{channelId}") { backStackEntry ->
+        composable("session/{channelId}") { backStackEntry ->
             val channelId = backStackEntry.arguments?.getString("channelId") ?: return@composable
             val channel = channels.find { it.id == channelId }
-            val buffer = buffers[channelId] ?: ""
 
-            TerminalScreen(
-                channelName = channel?.name ?: channelId,
+            WebViewSessionScreen(
+                relayUrl = prefs.relayUrl,
+                authToken = prefs.authToken,
                 channelId = channelId,
-                buffer = buffer,
-                screenText = screenTexts[channelId] ?: "",
-                displayBuffer = displayBuffers[channelId] ?: "",
-                hasPermission = activePermission == channelId,
-                permissionOptions = if (activePermission == channelId) permissionOptions else emptyList(),
+                channelName = channel?.name ?: channelId,
                 onBack = {
                     vm.selectChannel(null)
                     navController.popBackStack()
-                },
-                onSend = { text -> vm.sendInput(text) },
-                onApprove = { vm.sendRaw(channelId, "y\n") },
-                onDeny = { vm.sendRaw(channelId, "n\n") },
-                onSelectOption = { number -> vm.selectOption(channelId, number) },
-                onClearBuffer = { vm.clearBuffer(channelId) },
-                onSendEsc = { vm.sendEsc(channelId) }
+                }
             )
         }
 

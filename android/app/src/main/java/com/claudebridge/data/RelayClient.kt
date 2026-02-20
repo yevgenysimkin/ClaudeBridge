@@ -13,9 +13,9 @@ class RelayClient(
         fun onConnected()
         fun onDisconnected()
         fun onChannelList(channels: List<Channel>)
-        fun onChannelUpdate(channelId: String, agentStatus: String?, pendingPermission: Boolean?)
-        fun onPtyOutput(channel: String, data: String, isPermission: Boolean, permissionOptions: List<PermissionOption>, screenText: String)
-        fun onBufferSync(channel: String, data: String)
+        fun onChannelUpdate(channelId: String, name: String?, agentStatus: String?, pendingPermission: Boolean?)
+        fun onAgentEvent(channel: String, message: AgentMessage)
+        fun onHistorySync(channel: String, messages: List<AgentMessage>)
         fun onPing(pingId: String)
         fun onError(error: String)
     }
@@ -65,12 +65,66 @@ class RelayClient(
         connected = false
     }
 
-    /** Send input from phone to PTY proxy via relay. */
-    fun sendPtyInput(channel: String, data: String) {
+    /** Send a user prompt to the orchestrator via relay. */
+    fun sendUserPrompt(channel: String, text: String) {
         val msg = JSONObject().apply {
-            put("type", "pty_input")
+            put("type", "user_prompt")
             put("channel", channel)
-            put("data", data)
+            put("text", text)
+        }
+        webSocket?.send(msg.toString())
+    }
+
+    /** Send a permission response (allow/deny) to the orchestrator. */
+    fun sendPermissionResponse(
+        channel: String,
+        requestId: String,
+        behavior: String,
+        answers: Map<String, String>? = null
+    ) {
+        val msg = JSONObject().apply {
+            put("type", "permission_response")
+            put("channel", channel)
+            put("requestId", requestId)
+            put("behavior", behavior)
+            if (answers != null) {
+                put("answers", JSONObject(answers))
+            }
+        }
+        webSocket?.send(msg.toString())
+    }
+
+    /** Send interrupt request to abort the current agent turn. */
+    fun sendInterruptRequest(channel: String) {
+        val msg = JSONObject().apply {
+            put("type", "interrupt_request")
+            put("channel", channel)
+            put("timestamp", System.currentTimeMillis())
+        }
+        webSocket?.send(msg.toString())
+    }
+
+    /** Send a user prompt with file attachments. */
+    fun sendUserPromptWithAttachments(
+        channel: String,
+        text: String,
+        attachments: List<FileAttachment>
+    ) {
+        val msg = JSONObject().apply {
+            put("type", "user_prompt")
+            put("channel", channel)
+            put("text", text)
+            put("timestamp", System.currentTimeMillis())
+            val arr = JSONArray()
+            for (att in attachments) {
+                arr.put(JSONObject().apply {
+                    put("filename", att.filename)
+                    put("mimeType", att.mimeType)
+                    put("data", att.data)
+                    put("sizeBytes", att.sizeBytes)
+                })
+            }
+            put("attachments", arr)
         }
         webSocket?.send(msg.toString())
     }
@@ -80,6 +134,16 @@ class RelayClient(
         val msg = JSONObject().apply {
             put("type", "remove_channel")
             put("channel", channel)
+        }
+        webSocket?.send(msg.toString())
+    }
+
+    /** Rename a channel (sends rename_channel to relay). */
+    fun renameChannel(channel: String, name: String) {
+        val msg = JSONObject().apply {
+            put("type", "rename_channel")
+            put("channel", channel)
+            put("name", name)
         }
         webSocket?.send(msg.toString())
     }
@@ -115,48 +179,52 @@ class RelayClient(
             "channel_update" -> {
                 listener?.onChannelUpdate(
                     json.getString("channel"),
+                    if (json.has("name")) json.getString("name") else null,
                     json.optString("agentStatus", null),
                     if (json.has("pendingPermission")) json.getBoolean("pendingPermission") else null
                 )
             }
 
-            "pty_output" -> {
-                val options = mutableListOf<PermissionOption>()
-                val optionsArr = json.optJSONArray("permissionOptions")
-                if (optionsArr != null) {
-                    for (i in 0 until optionsArr.length()) {
-                        val opt = optionsArr.getJSONObject(i)
-                        options.add(PermissionOption(
-                            number = opt.getString("number"),
-                            label = opt.getString("label")
-                        ))
-                    }
-                }
-                listener?.onPtyOutput(
-                    json.getString("channel"),
-                    json.getString("data"),
-                    json.optBoolean("isPermission", false),
-                    options,
-                    json.optString("screenText", "")
-                )
+            "agent_event" -> {
+                val channel = json.getString("channel")
+                val message = parseAgentEvent(json)
+                listener?.onAgentEvent(channel, message)
             }
 
-            "buffer_sync" -> {
-                listener?.onBufferSync(
-                    json.getString("channel"),
-                    json.getString("data")
-                )
+            "history_sync" -> {
+                val channel = json.getString("channel")
+                val eventsArr = json.getJSONArray("events")
+                val messages = (0 until eventsArr.length()).mapNotNull { i ->
+                    try {
+                        parseAgentEvent(eventsArr.getJSONObject(i))
+                    } catch (_: Exception) { null }
+                }
+                listener?.onHistorySync(channel, messages)
             }
 
             "ping" -> {
                 val pingId = json.getString("pingId")
-                // Auto-respond with pong
                 sendPong(pingId)
                 listener?.onPing(pingId)
             }
 
             "error" -> listener?.onError(json.getString("message"))
         }
+    }
+
+    private fun parseAgentEvent(json: JSONObject): AgentMessage {
+        val kind = json.getString("kind")
+        val dataObj = json.optJSONObject("data")
+        val data = if (dataObj != null) jsonObjectToMap(dataObj) else emptyMap()
+        val isFinal = json.optBoolean("isFinal", true)
+        val requestId = json.optString("requestId", null)
+
+        return AgentMessage(
+            kind = kind,
+            data = data,
+            isFinal = isFinal,
+            requestId = requestId
+        )
     }
 
     private fun parseChannelList(arr: JSONArray): List<Channel> {
@@ -168,6 +236,24 @@ class RelayClient(
                 agentStatus = obj.optString("agentStatus", "idle"),
                 pendingPermission = obj.optBoolean("pendingPermission", false)
             )
+        }
+    }
+
+    /** Convert a JSONObject to a Map<String, Any?> recursively. */
+    private fun jsonObjectToMap(obj: JSONObject): Map<String, Any?> {
+        val map = mutableMapOf<String, Any?>()
+        for (key in obj.keys()) {
+            map[key] = jsonValueToKotlin(obj.get(key))
+        }
+        return map
+    }
+
+    private fun jsonValueToKotlin(value: Any?): Any? {
+        return when (value) {
+            is JSONObject -> jsonObjectToMap(value)
+            is JSONArray -> (0 until value.length()).map { jsonValueToKotlin(value.get(it)) }
+            JSONObject.NULL -> null
+            else -> value
         }
     }
 }

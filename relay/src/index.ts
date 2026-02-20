@@ -5,18 +5,22 @@ import type {
   AuthMessage,
   RelayMessage,
   ChannelList,
-  PtyOutput,
+  RenameChannel,
+  InterruptRequest,
+  AgentEvent,
+  UserPrompt,
+  PermissionResponse,
 } from "./protocol.js";
 
 // --- Config ---
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const AUTH_TOKEN = process.env.RELAY_AUTH_TOKEN;
+const AUTH_TOKEN = process.env.RELAY_AUTH_TOKEN;  // optional — if unset, any non-empty token is accepted
 const AUTH_TIMEOUT_MS = 10_000;
-const RING_BUFFER_SIZE = 500; // chunks per channel
+const RING_BUFFER_SIZE = 500; // events per channel
+const MAX_PAYLOAD_BYTES = 20 * 1024 * 1024; // 20MB for file uploads
 
 if (!AUTH_TOKEN) {
-  console.error("FATAL: RELAY_AUTH_TOKEN is not set.");
-  process.exit(1);
+  console.log("[relay] RELAY_AUTH_TOKEN not set — accepting any non-empty token (pairing mode).");
 }
 
 // --- State ---
@@ -36,8 +40,8 @@ const channelRegistry = new Map<string, {
   pendingPermission: boolean;
 }>();
 
-// Per-channel ring buffer for reconnecting clients
-const channelBuffers = new Map<string, string[]>();
+// Per-channel structured event buffer for SDK orchestrator
+const channelEvents = new Map<string, AgentEvent[]>();
 
 // --- HTTP server ---
 const server = createServer((req, res) => {
@@ -55,7 +59,7 @@ const server = createServer((req, res) => {
 });
 
 // --- WebSocket server ---
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, maxPayload: MAX_PAYLOAD_BYTES });
 
 wss.on("connection", (ws) => {
   const client: Client = { ws, clientType: "app", authenticated: false, ownedChannels: new Set() };
@@ -94,11 +98,20 @@ wss.on("connection", (ws) => {
       case "remove_channel":
         handleRemoveChannel(msg.channel);
         break;
-      case "pty_output":
-        handlePtyOutput(client, msg);
+      case "rename_channel":
+        handleRenameChannel(msg.channel, msg.name);
         break;
-      case "pty_input":
-        handlePtyInput(client, msg.channel, msg.data);
+      case "interrupt_request":
+        handleInterruptRequest(client, msg);
+        break;
+      case "agent_event":
+        handleAgentEvent(client, msg);
+        break;
+      case "user_prompt":
+        handleUserPrompt(client, msg);
+        break;
+      case "permission_response":
+        handlePermissionResponse(client, msg);
         break;
       case "ping":
         handlePing(client, msg.pingId);
@@ -119,7 +132,7 @@ wss.on("connection", (ws) => {
     if (client.clientType === "bot" && client.ownedChannels.size > 0) {
       for (const channel of client.ownedChannels) {
         channelRegistry.delete(channel);
-        channelBuffers.delete(channel);
+        channelEvents.delete(channel);
         console.log(`[relay] Auto-removed channel: ${channel} (bot disconnected)`);
       }
       broadcastChannelList();
@@ -134,8 +147,14 @@ wss.on("connection", (ws) => {
 // --- Handlers ---
 
 function handleAuth(client: Client, msg: AuthMessage): void {
-  if (msg.token !== AUTH_TOKEN) {
-    send(client.ws, { type: "auth_result", success: false, error: "Invalid token." });
+  // If RELAY_AUTH_TOKEN is set, enforce exact match (locked mode).
+  // If unset, accept any non-empty token (pairing mode — C generates the token).
+  const tokenValid = AUTH_TOKEN
+    ? msg.token === AUTH_TOKEN
+    : msg.token && msg.token.length > 0;
+
+  if (!tokenValid) {
+    send(client.ws, { type: "auth_result", success: false, error: AUTH_TOKEN ? "Invalid token." : "Token required." });
     client.ws.close();
     return;
   }
@@ -145,14 +164,14 @@ function handleAuth(client: Client, msg: AuthMessage): void {
   send(client.ws, { type: "auth_result", success: true });
   sendChannelList(client);
 
-  // Send buffer catch-up for all channels to reconnecting app clients
+  // Send structured event history for reconnecting app clients
   if (client.clientType === "app") {
-    for (const [channel, buffer] of channelBuffers) {
-      if (buffer.length > 0) {
+    for (const [channel, events] of channelEvents) {
+      if (events.length > 0) {
         send(client.ws, {
-          type: "buffer_sync",
+          type: "history_sync",
           channel,
-          data: buffer.join(""),
+          events,
           timestamp: Date.now(),
         });
       }
@@ -171,9 +190,8 @@ function handleRegisterChannel(client: Client, channel: string, name: string, ag
   } else {
     channelRegistry.set(channel, { name, agentStatus, pendingPermission: false });
   }
-  // Initialize ring buffer if needed
-  if (!channelBuffers.has(channel)) {
-    channelBuffers.set(channel, []);
+  if (!channelEvents.has(channel)) {
+    channelEvents.set(channel, []);
   }
   broadcastChannelList();
   console.log(`[relay] Channel registered: ${channel} (${name}) [${agentStatus}]`);
@@ -181,57 +199,64 @@ function handleRegisterChannel(client: Client, channel: string, name: string, ag
 
 function handleRemoveChannel(channel: string): void {
   if (channelRegistry.delete(channel)) {
-    channelBuffers.delete(channel);
+    channelEvents.delete(channel);
+    // Notify orchestrator so it can kill the subprocess
+    broadcastToBots({ type: "channel_update", channel, agentStatus: "removed" });
     broadcastChannelList();
     console.log(`[relay] Channel removed: ${channel}`);
   }
 }
 
-function handlePtyOutput(client: Client, msg: PtyOutput): void {
+function handleInterruptRequest(_client: Client, msg: InterruptRequest): void {
+  if (!channelRegistry.has(msg.channel)) {
+    send(_client.ws, { type: "error", message: `Channel not found: ${msg.channel}` });
+    return;
+  }
+  broadcastToBots(msg);
+  console.log(`[relay] Interrupt request for channel: ${msg.channel}`);
+}
+
+function handleRenameChannel(channel: string, name: string): void {
+  const info = channelRegistry.get(channel);
+  if (!info) return;
+  info.name = name;
+  broadcastChannelUpdate(channel);
+  console.log(`[relay] Channel renamed: ${channel} → ${name}`);
+}
+
+// --- SDK Protocol Handlers ---
+
+function handleAgentEvent(client: Client, msg: AgentEvent): void {
   if (client.clientType !== "bot") {
-    send(client.ws, { type: "error", message: "Only bot clients can send pty_output." });
+    send(client.ws, { type: "error", message: "Only bot clients can send agent_event." });
     return;
   }
 
-  // Append to ring buffer
-  let buffer = channelBuffers.get(msg.channel);
-  if (!buffer) {
-    buffer = [];
-    channelBuffers.set(msg.channel, buffer);
+  // Append to structured event buffer
+  let events = channelEvents.get(msg.channel);
+  if (!events) {
+    events = [];
+    channelEvents.set(msg.channel, events);
   }
-  buffer.push(msg.data);
-  if (buffer.length > RING_BUFFER_SIZE) {
-    buffer.shift();
-  }
-
-  // Update pending permission flag
-  if (msg.isPermission) {
-    const info = channelRegistry.get(msg.channel);
-    if (info && !info.pendingPermission) {
-      info.pendingPermission = true;
-      broadcastChannelUpdate(msg.channel);
-    }
+  events.push(msg);
+  if (events.length > RING_BUFFER_SIZE) {
+    events.shift();
   }
 
-  // Broadcast to app clients only (proxy already has the output locally)
+  // Broadcast to app clients
   broadcastToApps(msg);
 }
 
-function handlePtyInput(client: Client, channel: string, data: string): void {
-  // Forward input from app to bot (PTY proxy)
-  const msg: RelayMessage = { type: "pty_input", channel, data };
+function handleUserPrompt(client: Client, msg: UserPrompt): void {
+  // Forward to bot (orchestrator) and mirror to other app clients
   broadcastToBots(msg);
+  // Echo to all app clients so every surface sees the user's message
+  broadcastToApps({ ...msg, type: "user_prompt" });
+}
 
-  // If this looks like a permission response, clear the pending flag
-  // Recognizes: y/n/yes/no and digit strings (numbered option selection)
-  const trimmed = data.trim().toLowerCase();
-  if (trimmed === "y" || trimmed === "n" || trimmed === "yes" || trimmed === "no" || /^\d+$/.test(trimmed)) {
-    const info = channelRegistry.get(channel);
-    if (info && info.pendingPermission) {
-      info.pendingPermission = false;
-      broadcastChannelUpdate(channel);
-    }
-  }
+function handlePermissionResponse(client: Client, msg: PermissionResponse): void {
+  // Forward permission response to bot (orchestrator)
+  broadcastToBots(msg);
 }
 
 function handlePing(_client: Client, pingId: string): void {
@@ -303,6 +328,7 @@ function broadcastChannelUpdate(channel: string): void {
   const msg: RelayMessage = {
     type: "channel_update",
     channel,
+    name: info.name,
     agentStatus: info.agentStatus,
     pendingPermission: info.pendingPermission,
   };

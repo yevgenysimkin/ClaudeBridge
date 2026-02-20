@@ -1,7 +1,8 @@
 /**
  * ClaudeBridge Relay Protocol
  *
- * Shared message types between PTY proxy, relay, and Android app.
+ * Shared message types between orchestrator, relay, and clients
+ * (Chromattica desktop app, Android phone app).
  * All messages are JSON over WebSocket.
  */
 
@@ -14,7 +15,7 @@ export interface AuthMessage {
   clientType: "bot" | "app";
 }
 
-/** Bot (PTY proxy) registers/updates a channel. */
+/** Bot (orchestrator) registers/updates a channel. */
 export interface RegisterChannel {
   type: "register_channel";
   channel: string;
@@ -28,29 +29,11 @@ export interface RemoveChannel {
   channel: string;
 }
 
-/** Parsed permission option from a numbered Claude Code prompt. */
-export interface PermissionOption {
-  number: string;
-  label: string;
-}
-
-/** PTY proxy → relay → app: terminal output chunk. */
-export interface PtyOutput {
-  type: "pty_output";
+/** Rename a channel (from phone or orchestrator). */
+export interface RenameChannel {
+  type: "rename_channel";
   channel: string;
-  data: string;
-  timestamp: number;
-  isPermission?: boolean;
-  permissionOptions?: PermissionOption[];
-  /** Rendered screen text from headless vterm — proper line breaks, no ANSI. */
-  screenText?: string;
-}
-
-/** App → relay → PTY proxy: user input from phone. */
-export interface PtyInput {
-  type: "pty_input";
-  channel: string;
-  data: string;
+  name: string;
 }
 
 /** Ping to verify app connectivity. */
@@ -65,12 +48,86 @@ export interface Pong {
   pingId: string;
 }
 
+// --- SDK Protocol: Client → Relay ---
+
+/** Discriminated event kinds for agent_event messages. */
+export type AgentEventKind =
+  | "system"              // Session init (sessionId, model, tools, etc.)
+  | "assistant_text"      // Text content (streaming delta or final block)
+  | "tool_use"            // Claude wants to use a tool
+  | "tool_result"         // Tool execution result
+  | "permission_request"  // Waiting for user approval
+  | "permission_resolved" // Permission answered
+  | "thinking"            // Extended thinking block
+  | "result"              // Turn complete (cost, usage, errors)
+  | "session_end";        // Orchestrator shutting down
+
+/**
+ * Structured SDK event envelope.
+ * Relay treats `data` as opaque JSON — stores and forwards without interpreting.
+ */
+export interface AgentEvent {
+  type: "agent_event";
+  channel: string;
+  kind: AgentEventKind;
+  /** Opaque event payload — shape depends on `kind`. */
+  data: Record<string, unknown>;
+  timestamp: number;
+  /** For streaming text: false while tokens arrive, true on final block. */
+  isFinal?: boolean;
+  /** Unique ID for correlating requests/responses (e.g., permission flow). */
+  requestId?: string;
+}
+
+/** Interrupt the currently running agent turn. */
+export interface InterruptRequest {
+  type: "interrupt_request";
+  channel: string;
+  timestamp: number;
+}
+
+/** File attachment sent with a user prompt. */
+export interface FileAttachment {
+  filename: string;
+  mimeType: string;
+  /** Base64-encoded file content. */
+  data: string;
+  sizeBytes: number;
+}
+
+/** App/desktop → relay → orchestrator: user sends a new message. */
+export interface UserPrompt {
+  type: "user_prompt";
+  channel: string;
+  text: string;
+  timestamp: number;
+  attachments?: FileAttachment[];
+}
+
+/**
+ * App/desktop → relay → orchestrator: user approves/denies a permission
+ * or answers an AskUserQuestion.
+ */
+export interface PermissionResponse {
+  type: "permission_response";
+  channel: string;
+  requestId: string;
+  /** "allow", "allowAlways", or "deny" for tool permissions. */
+  behavior: "allow" | "allowAlways" | "deny";
+  /** For AskUserQuestion: the user's answers keyed by question text. */
+  answers?: Record<string, string>;
+  timestamp: number;
+}
+
 export type ClientMessage =
   | AuthMessage
   | RegisterChannel
   | RemoveChannel
-  | PtyOutput
-  | PtyInput
+  | RenameChannel
+  | InterruptRequest
+  | AgentEvent
+  | UserPrompt
+  | PermissionResponse
   | Ping
   | Pong;
 
@@ -99,16 +156,8 @@ export interface ChannelUpdate {
   type: "channel_update";
   channel: string;
   name?: string;
-  agentStatus?: "running" | "stopped" | "idle";
+  agentStatus?: "running" | "stopped" | "idle" | "removed";
   pendingPermission?: boolean;
-}
-
-/** Full buffer catch-up for reconnecting clients. */
-export interface BufferSync {
-  type: "buffer_sync";
-  channel: string;
-  data: string;
-  timestamp: number;
 }
 
 /** Error from relay. */
@@ -117,13 +166,25 @@ export interface RelayError {
   message: string;
 }
 
+// --- SDK Protocol: Relay → Client ---
+
+/** Full structured event history for reconnecting clients. */
+export interface HistorySync {
+  type: "history_sync";
+  channel: string;
+  events: AgentEvent[];
+  timestamp: number;
+}
+
 export type RelayMessage =
   | AuthResult
   | ChannelList
   | ChannelUpdate
-  | PtyOutput
-  | PtyInput
-  | BufferSync
+  | InterruptRequest
+  | AgentEvent
+  | UserPrompt
+  | PermissionResponse
+  | HistorySync
   | Ping
   | Pong
   | RelayError;

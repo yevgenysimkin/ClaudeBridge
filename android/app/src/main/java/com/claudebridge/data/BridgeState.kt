@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Singleton state holder shared between RelayService (writes) and UI (reads).
- * Terminal buffer per channel instead of discrete chat messages.
+ * Structured SDK messages per channel instead of raw terminal buffers.
  */
 object BridgeState {
     private val _connected = MutableStateFlow(false)
@@ -14,27 +14,22 @@ object BridgeState {
     private val _channels = MutableStateFlow<List<Channel>>(emptyList())
     val channels: StateFlow<List<Channel>> = _channels
 
-    // channelId → terminal output text buffer
-    private val _buffers = MutableStateFlow<Map<String, String>>(emptyMap())
-    val buffers: StateFlow<Map<String, String>> = _buffers
+    // channelId → ordered list of structured messages
+    private val _messages = MutableStateFlow<Map<String, List<AgentMessage>>>(emptyMap())
+    val messages: StateFlow<Map<String, List<AgentMessage>>> = _messages
 
+    // channelId → pending permission request (null if none)
+    private val _pendingPermission = MutableStateFlow<Map<String, PermissionRequest>>(emptyMap())
+    val pendingPermission: StateFlow<Map<String, PermissionRequest>> = _pendingPermission
 
-    // channelId → latest vterm-rendered screen text (replace, not append)
-    private val _screenTexts = MutableStateFlow<Map<String, String>>(emptyMap())
-    val screenTexts: StateFlow<Map<String, String>> = _screenTexts
-
-    // channelId of channel with active permission prompt
-    private val _activePermission = MutableStateFlow<String?>(null)
-    val activePermission: StateFlow<String?> = _activePermission
-
-    // Parsed options for the active permission prompt
-    private val _permissionOptions = MutableStateFlow<List<PermissionOption>>(emptyList())
-    val permissionOptions: StateFlow<List<PermissionOption>> = _permissionOptions
+    // channelId → in-progress streaming text (not yet finalized)
+    private val _streamingText = MutableStateFlow<Map<String, String>>(emptyMap())
+    val streamingText: StateFlow<Map<String, String>> = _streamingText
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
 
-    private const val MAX_BUFFER_SIZE = 100_000 // characters per channel
+    private const val MAX_MESSAGES_PER_CHANNEL = 500
 
     fun setConnected(value: Boolean) {
         _connected.value = value
@@ -44,107 +39,93 @@ object BridgeState {
         _channels.value = list
     }
 
-    fun updateChannel(channelId: String, agentStatus: String?, pendingPermission: Boolean?) {
+    fun updateChannel(channelId: String, name: String?, agentStatus: String?, pendingPermission: Boolean?) {
         _channels.value = _channels.value.map { ch ->
             if (ch.id == channelId) {
                 ch.copy(
+                    name = name ?: ch.name,
                     agentStatus = agentStatus ?: ch.agentStatus,
                     pendingPermission = pendingPermission ?: ch.pendingPermission
                 )
             } else ch
         }
-        // Track active permission for UI
-        if (pendingPermission == true) {
-            _activePermission.value = channelId
-        } else if (pendingPermission == false && _activePermission.value == channelId) {
-            _activePermission.value = null
-        }
     }
 
-    fun appendOutput(channelId: String, text: String) {
-        val current = _buffers.value.toMutableMap()
-        val existing = current[channelId] ?: ""
-        val updated = existing + text
-        // Trim from the front if too large
-        current[channelId] = if (updated.length > MAX_BUFFER_SIZE) {
-            updated.substring(updated.length - MAX_BUFFER_SIZE)
+    /** Append a structured message to a channel's history. */
+    fun appendMessage(channelId: String, message: AgentMessage) {
+        val current = _messages.value.toMutableMap()
+        val list = (current[channelId] ?: emptyList()).toMutableList()
+        list.add(message)
+        // Trim oldest if too many
+        if (list.size > MAX_MESSAGES_PER_CHANNEL) {
+            current[channelId] = list.drop(list.size - MAX_MESSAGES_PER_CHANNEL)
         } else {
-            updated
+            current[channelId] = list
         }
-        _buffers.value = current
+        _messages.value = current
     }
 
-    fun setBuffer(channelId: String, text: String) {
-        val current = _buffers.value.toMutableMap()
-        current[channelId] = if (text.length > MAX_BUFFER_SIZE) {
-            text.substring(text.length - MAX_BUFFER_SIZE)
+    /** Update streaming text for a channel (non-final assistant_text). */
+    fun updateStreamingText(channelId: String, text: String) {
+        val current = _streamingText.value.toMutableMap()
+        current[channelId] = (current[channelId] ?: "") + text
+        _streamingText.value = current
+    }
+
+    /** Finalize streaming text: commit as a message and clear the buffer. */
+    fun finalizeStreamingText(channelId: String, finalText: String) {
+        // Clear streaming buffer
+        val current = _streamingText.value.toMutableMap()
+        current.remove(channelId)
+        _streamingText.value = current
+
+        // Add final message
+        if (finalText.isNotBlank()) {
+            appendMessage(channelId, AgentMessage(
+                kind = AgentEventKind.ASSISTANT_TEXT,
+                data = mapOf("text" to finalText),
+                isFinal = true
+            ))
+        }
+    }
+
+    /** Set a pending permission request for a channel. */
+    fun setPendingPermission(channelId: String, request: PermissionRequest) {
+        val current = _pendingPermission.value.toMutableMap()
+        current[channelId] = request
+        _pendingPermission.value = current
+    }
+
+    /** Clear pending permission for a channel. */
+    fun clearPendingPermission(channelId: String) {
+        val current = _pendingPermission.value.toMutableMap()
+        current.remove(channelId)
+        _pendingPermission.value = current
+    }
+
+    /** Replace all messages for a channel (used for history_sync). */
+    fun setMessages(channelId: String, messages: List<AgentMessage>) {
+        val current = _messages.value.toMutableMap()
+        current[channelId] = if (messages.size > MAX_MESSAGES_PER_CHANNEL) {
+            messages.drop(messages.size - MAX_MESSAGES_PER_CHANNEL)
         } else {
-            text
+            messages
         }
-        _buffers.value = current
-    }
-
-    fun setScreenText(channelId: String, text: String) {
-        val current = _screenTexts.value.toMutableMap()
-        current[channelId] = text
-        _screenTexts.value = current
-    }
-
-    fun setActivePermission(channelId: String?) {
-        _activePermission.value = channelId
-        if (channelId == null) {
-            _permissionOptions.value = emptyList()
-        }
-    }
-
-    fun setPermissionOptions(options: List<PermissionOption>) {
-        _permissionOptions.value = options
-    }
-
-    // channelId → display text (write-once, clearable)
-    private val _displayBuffers = MutableStateFlow<Map<String, String>>(emptyMap())
-    val displayBuffers: StateFlow<Map<String, String>> = _displayBuffers
-
-    // channelId → set of message hashes we've already written (never cleared)
-    private val seenHashes = mutableMapOf<String, MutableSet<String>>()
-
-    /** Try to append a message. Returns true if it was new (not seen before). */
-    fun appendIfNew(channelId: String, message: String): Boolean {
-        val hash = message.hashCode().toString()
-        val seen = seenHashes.getOrPut(channelId) { mutableSetOf() }
-        if (!seen.add(hash)) return false // already seen
-
-        val current = _displayBuffers.value.toMutableMap()
-        val existing = current[channelId] ?: ""
-        current[channelId] = if (existing.isBlank()) message else "$existing\n\n$message"
-        _displayBuffers.value = current
-        return true
-    }
-
-    /** Clear display buffer. Seen hashes are kept so old messages stay suppressed. */
-    fun clearBuffer(channelId: String) {
-        val current = _displayBuffers.value.toMutableMap()
-        current[channelId] = ""
-        _displayBuffers.value = current
+        _messages.value = current
     }
 
     /** Remove a channel and all its associated state. */
     fun removeChannel(channelId: String) {
         _channels.value = _channels.value.filter { it.id != channelId }
-        val bufCurrent = _buffers.value.toMutableMap()
-        bufCurrent.remove(channelId)
-        _buffers.value = bufCurrent
-        val screenCurrent = _screenTexts.value.toMutableMap()
-        screenCurrent.remove(channelId)
-        _screenTexts.value = screenCurrent
-        val dispCurrent = _displayBuffers.value.toMutableMap()
-        dispCurrent.remove(channelId)
-        _displayBuffers.value = dispCurrent
-        seenHashes.remove(channelId)
-        if (_activePermission.value == channelId) {
-            _activePermission.value = null
-            _permissionOptions.value = emptyList()
-        }
+        val msgCurrent = _messages.value.toMutableMap()
+        msgCurrent.remove(channelId)
+        _messages.value = msgCurrent
+        val permCurrent = _pendingPermission.value.toMutableMap()
+        permCurrent.remove(channelId)
+        _pendingPermission.value = permCurrent
+        val streamCurrent = _streamingText.value.toMutableMap()
+        streamCurrent.remove(channelId)
+        _streamingText.value = streamCurrent
     }
 
     fun setError(err: String?) {
@@ -154,10 +135,9 @@ object BridgeState {
     fun clear() {
         _connected.value = false
         _channels.value = emptyList()
-        _buffers.value = emptyMap()
-        _screenTexts.value = emptyMap()
-        _activePermission.value = null
-        _permissionOptions.value = emptyList()
+        _messages.value = emptyMap()
+        _pendingPermission.value = emptyMap()
+        _streamingText.value = emptyMap()
         _error.value = null
     }
 }

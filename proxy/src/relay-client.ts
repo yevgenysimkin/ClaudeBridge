@@ -7,7 +7,7 @@ const PING_INTERVAL_MS = 25_000; // Keep connection alive through Railway's prox
 
 export type RelayMessageHandler = (msg: Record<string, unknown>) => void;
 
-// --- File-based logging (stderr corrupts Claude Code's TUI) ---
+// --- File-based logging ---
 
 const LOG_FILE = process.env.BRIDGE_LOG || "/tmp/claudebridge-proxy.log";
 
@@ -20,7 +20,7 @@ function log(msg: string): void {
  * WebSocket client that connects to the ClaudeBridge relay.
  * Handles auth, reconnection, and message routing.
  *
- * All logging goes to a file (not stderr) to avoid corrupting the PTY TUI.
+ * All logging goes to a file to keep stdout clean.
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
@@ -61,6 +61,22 @@ export class RelayClient {
   registerChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
     this.registeredChannel = { channel, name, agentStatus };
     this.send({ type: "register_channel", channel, name, agentStatus });
+  }
+
+  /** Send a structured agent event to the relay. */
+  sendAgentEvent(channel: string, kind: string, data: Record<string, unknown>, options?: {
+    isFinal?: boolean;
+    requestId?: string;
+  }): void {
+    this.send({
+      type: "agent_event",
+      channel,
+      kind,
+      data,
+      timestamp: Date.now(),
+      ...(options?.isFinal !== undefined && { isFinal: options.isFinal }),
+      ...(options?.requestId && { requestId: options.requestId }),
+    });
   }
 
   /** Whether the client is connected and authenticated. */
@@ -149,6 +165,14 @@ export class RelayClient {
           this.ws?.close();
         }
         return;
+      }
+
+      // Sync renamed channel name so reconnect re-registers with the updated name
+      if (msg.type === "channel_update" && typeof msg.name === "string" && this.registeredChannel) {
+        if (msg.channel === this.registeredChannel.channel) {
+          this.registeredChannel.name = msg.name;
+          log(`Channel name updated: ${msg.name}`);
+        }
       }
 
       // Dispatch to handlers

@@ -1,21 +1,21 @@
 {
   "name": "claudebridge-proxy",
-  "version": "0.1.0",
-  "description": "PTY proxy: wraps Claude Code, mirrors I/O to local terminal and phone via relay",
+  "version": "0.2.0",
+  "description": "CLI orchestrator: headless Claude Code agent via relay, consumed by Chromattica desktop and Android app",
   "type": "module",
-  "main": "dist/pty-proxy.js",
+  "main": "dist/orchestrator.js",
+  "bin": {
+    "claude-bridge": "./bin/claude-bridge.js"
+  },
   "scripts": {
-    "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper 2>/dev/null || true",
     "build": "tsc",
-    "dev": "tsx src/pty-proxy.ts",
-    "start": "node dist/pty-proxy.js",
+    "dev": "tsx src/orchestrator.ts",
+    "start": "node dist/orchestrator.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@xterm/headless": "^6.0.0",
     "dotenv": "^16.4.7",
-    "node-pty": "^1.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

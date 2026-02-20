@@ -14,15 +14,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * ViewModel for the terminal UI. Binds to RelayService and delegates
+ * ViewModel for the message UI. Binds to RelayService and delegates
  * all state observation to BridgeState.
  */
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
-
-    companion object {
-        /** ANSI escape for arrow-down key, used to navigate TUI selection widgets. */
-        private const val ARROW_DOWN = "\u001b[B"
-    }
 
     private val prefs = Preferences(application)
     private var service: RelayService? = null
@@ -34,11 +29,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Delegate to BridgeState
     val connected = BridgeState.connected
     val channels = BridgeState.channels
-    val buffers = BridgeState.buffers
-    val activePermission = BridgeState.activePermission
-    val permissionOptions = BridgeState.permissionOptions
-    val screenTexts = BridgeState.screenTexts
-    val displayBuffers = BridgeState.displayBuffers
+    val messages = BridgeState.messages
+    val pendingPermission = BridgeState.pendingPermission
+    val streamingText = BridgeState.streamingText
     val error = BridgeState.error
 
     private val connection = object : ServiceConnection {
@@ -85,36 +78,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _currentChannel.value = channelId
     }
 
-    /** Send text input from phone to the PTY proxy. */
-    fun sendInput(text: String) {
+    /** Send a user prompt to the orchestrator. */
+    fun sendPrompt(text: String) {
         val channel = _currentChannel.value ?: return
-        service?.sendPtyInput(channel, text + "\n")
+        service?.sendUserPrompt(channel, text)
+        // Add user message to local state immediately for feedback
+        BridgeState.appendMessage(channel, com.claudebridge.data.AgentMessage(
+            kind = "user_prompt",
+            data = mapOf("text" to text),
+            isFinal = true
+        ))
     }
 
-    /** Send raw keystrokes (e.g., "y\n" for permission approval). */
-    fun sendRaw(channel: String, data: String) {
-        service?.sendPtyInput(channel, data)
-        BridgeState.setActivePermission(null)
+    /** Respond to a permission request. */
+    fun respondToPermission(channel: String, requestId: String, behavior: String, answers: Map<String, String>? = null) {
+        service?.sendPermissionResponse(channel, requestId, behavior, answers)
+        BridgeState.clearPendingPermission(channel)
     }
 
-    /** Select a numbered permission option by navigating the TUI selection widget. */
-    fun selectOption(channel: String, optionNumber: String) {
-        // Claude Code's TUI uses arrow-key navigation, not digit keys.
-        // Cursor starts at option 1, so we need (N-1) down-arrows then Enter.
-        val n = optionNumber.toIntOrNull() ?: 1
-        val downArrows = ARROW_DOWN.repeat((n - 1).coerceAtLeast(0))
-        service?.sendPtyInput(channel, downArrows + "\n")
-        BridgeState.setActivePermission(null)
-    }
-
-    /** Send ESC key to interrupt Claude. */
-    fun sendEsc(channel: String) {
-        service?.sendPtyInput(channel, "\u001b")
-    }
-
-    /** Clear the display buffer. Old messages stay suppressed via seen hashes. */
-    fun clearBuffer(channel: String) {
-        BridgeState.clearBuffer(channel)
+    /** Rename a channel (sends rename to relay, updates local state). */
+    fun renameChannel(channelId: String, newName: String) {
+        service?.renameChannel(channelId, newName)
+        BridgeState.updateChannel(channelId, name = newName, agentStatus = null, pendingPermission = null)
     }
 
     /** Remove a channel from the relay (manual cleanup). */
