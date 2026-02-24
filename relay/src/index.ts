@@ -29,6 +29,7 @@ interface Client {
   ws: WebSocket;
   clientType: "bot" | "app";
   authenticated: boolean;
+  token: string;             // auth token — scopes channel visibility
   ownedChannels: Set<string>;
 }
 
@@ -38,6 +39,7 @@ const channelRegistry = new Map<string, {
   name: string;
   agentStatus: "running" | "stopped" | "idle";
   pendingPermission: boolean;
+  token: string;             // scopes this channel to its creator's token
 }>();
 
 // Per-channel structured event buffer for SDK orchestrator
@@ -62,7 +64,7 @@ const server = createServer((req, res) => {
 const wss = new WebSocketServer({ server, maxPayload: MAX_PAYLOAD_BYTES });
 
 wss.on("connection", (ws) => {
-  const client: Client = { ws, clientType: "app", authenticated: false, ownedChannels: new Set() };
+  const client: Client = { ws, clientType: "app", authenticated: false, token: "", ownedChannels: new Set() };
   clients.add(client);
 
   const authTimer = setTimeout(() => {
@@ -96,10 +98,10 @@ wss.on("connection", (ws) => {
         handleRegisterChannel(client, msg.channel, msg.name, msg.agentStatus);
         break;
       case "remove_channel":
-        handleRemoveChannel(msg.channel);
+        handleRemoveChannel(client, msg.channel);
         break;
       case "rename_channel":
-        handleRenameChannel(msg.channel, msg.name);
+        handleRenameChannel(client, msg.channel, msg.name);
         break;
       case "interrupt_request":
         handleInterruptRequest(client, msg);
@@ -135,7 +137,8 @@ wss.on("connection", (ws) => {
         channelEvents.delete(channel);
         console.log(`[relay] Auto-removed channel: ${channel} (bot disconnected)`);
       }
-      broadcastChannelList();
+      // Only notify clients with the same token
+      broadcastChannelList(client.token);
     }
 
     console.log(`[relay] ${client.clientType} disconnected. Clients: ${clients.size}`);
@@ -161,13 +164,15 @@ function handleAuth(client: Client, msg: AuthMessage): void {
 
   client.authenticated = true;
   client.clientType = msg.clientType;
+  client.token = AUTH_TOKEN || msg.token;  // locked mode: normalize to the shared token
   send(client.ws, { type: "auth_result", success: true });
   sendChannelList(client);
 
-  // Send structured event history for reconnecting app clients
+  // Send structured event history for reconnecting app clients (token-scoped)
   if (client.clientType === "app") {
     for (const [channel, events] of channelEvents) {
-      if (events.length > 0) {
+      const info = channelRegistry.get(channel);
+      if (events.length > 0 && info && info.token === client.token) {
         send(client.ws, {
           type: "history_sync",
           channel,
@@ -188,37 +193,40 @@ function handleRegisterChannel(client: Client, channel: string, name: string, ag
     existing.name = name;
     existing.agentStatus = agentStatus;
   } else {
-    channelRegistry.set(channel, { name, agentStatus, pendingPermission: false });
+    channelRegistry.set(channel, { name, agentStatus, pendingPermission: false, token: client.token });
   }
   if (!channelEvents.has(channel)) {
     channelEvents.set(channel, []);
   }
-  broadcastChannelList();
+  broadcastChannelList(client.token);
   console.log(`[relay] Channel registered: ${channel} (${name}) [${agentStatus}]`);
 }
 
-function handleRemoveChannel(channel: string): void {
-  if (channelRegistry.delete(channel)) {
-    channelEvents.delete(channel);
-    // Notify orchestrator so it can kill the subprocess
-    broadcastToBots({ type: "channel_update", channel, agentStatus: "removed" });
-    broadcastChannelList();
-    console.log(`[relay] Channel removed: ${channel}`);
-  }
+function handleRemoveChannel(client: Client, channel: string): void {
+  const info = channelRegistry.get(channel);
+  if (!info || info.token !== client.token) return;  // token mismatch — ignore
+  channelRegistry.delete(channel);
+  channelEvents.delete(channel);
+  // Notify orchestrator so it can kill the subprocess
+  broadcastToBots({ type: "channel_update", channel, agentStatus: "removed" }, client.token);
+  broadcastChannelList(client.token);
+  console.log(`[relay] Channel removed: ${channel}`);
 }
 
-function handleInterruptRequest(_client: Client, msg: InterruptRequest): void {
-  if (!channelRegistry.has(msg.channel)) {
-    send(_client.ws, { type: "error", message: `Channel not found: ${msg.channel}` });
+function handleInterruptRequest(client: Client, msg: InterruptRequest): void {
+  const info = channelRegistry.get(msg.channel);
+  if (!info) {
+    send(client.ws, { type: "error", message: `Channel not found: ${msg.channel}` });
     return;
   }
-  broadcastToBots(msg);
+  if (info.token !== client.token) return;  // token mismatch — ignore
+  broadcastToBots(msg, client.token);
   console.log(`[relay] Interrupt request for channel: ${msg.channel}`);
 }
 
-function handleRenameChannel(channel: string, name: string): void {
+function handleRenameChannel(client: Client, channel: string, name: string): void {
   const info = channelRegistry.get(channel);
-  if (!info) return;
+  if (!info || info.token !== client.token) return;  // token mismatch — ignore
   info.name = name;
   broadcastChannelUpdate(channel);
   console.log(`[relay] Channel renamed: ${channel} → ${name}`);
@@ -232,6 +240,9 @@ function handleAgentEvent(client: Client, msg: AgentEvent): void {
     return;
   }
 
+  const info = channelRegistry.get(msg.channel);
+  if (info && info.token !== client.token) return;  // token mismatch — ignore
+
   // Append to structured event buffer
   let events = channelEvents.get(msg.channel);
   if (!events) {
@@ -243,35 +254,35 @@ function handleAgentEvent(client: Client, msg: AgentEvent): void {
     events.shift();
   }
 
-  // Broadcast to app clients
-  broadcastToApps(msg);
+  // Broadcast to app clients with same token
+  broadcastToApps(msg, client.token);
 }
 
 function handleUserPrompt(client: Client, msg: UserPrompt): void {
-  // Forward to bot (orchestrator) and mirror to other app clients
-  broadcastToBots(msg);
+  // Forward to bot (orchestrator) and mirror to other app clients — scoped by token
+  broadcastToBots(msg, client.token);
   // Echo to all app clients so every surface sees the user's message
-  broadcastToApps({ ...msg, type: "user_prompt" });
+  broadcastToApps({ ...msg, type: "user_prompt" }, client.token);
 }
 
 function handlePermissionResponse(client: Client, msg: PermissionResponse): void {
-  // Forward permission response to bot (orchestrator)
-  broadcastToBots(msg);
+  // Forward permission response to bot (orchestrator) — scoped by token
+  broadcastToBots(msg, client.token);
 }
 
-function handlePing(_client: Client, pingId: string): void {
+function handlePing(client: Client, pingId: string): void {
   const msg = JSON.stringify({ type: "ping", pingId });
   for (const c of clients) {
-    if (c.authenticated && c.clientType === "app" && c.ws.readyState === WebSocket.OPEN) {
+    if (c.authenticated && c.clientType === "app" && c.token === client.token && c.ws.readyState === WebSocket.OPEN) {
       c.ws.send(msg);
     }
   }
 }
 
-function handlePong(_client: Client, pingId: string): void {
+function handlePong(client: Client, pingId: string): void {
   const msg = JSON.stringify({ type: "pong", pingId });
   for (const c of clients) {
-    if (c.authenticated && c.clientType === "bot" && c.ws.readyState === WebSocket.OPEN) {
+    if (c.authenticated && c.clientType === "bot" && c.token === client.token && c.ws.readyState === WebSocket.OPEN) {
       c.ws.send(msg);
     }
   }
@@ -279,19 +290,21 @@ function handlePong(_client: Client, pingId: string): void {
 
 // --- Broadcasting ---
 
-function broadcastToApps(msg: RelayMessage): void {
+function broadcastToApps(msg: RelayMessage, token?: string): void {
   const json = JSON.stringify(msg);
   for (const c of clients) {
     if (c.authenticated && c.clientType === "app" && c.ws.readyState === WebSocket.OPEN) {
+      if (token && c.token !== token) continue;  // token mismatch — skip
       c.ws.send(json);
     }
   }
 }
 
-function broadcastToBots(msg: RelayMessage): void {
+function broadcastToBots(msg: RelayMessage, token?: string): void {
   const json = JSON.stringify(msg);
   for (const c of clients) {
     if (c.authenticated && c.clientType === "bot" && c.ws.readyState === WebSocket.OPEN) {
+      if (token && c.token !== token) continue;  // token mismatch — skip
       c.ws.send(json);
     }
   }
@@ -306,19 +319,24 @@ function send(ws: WebSocket, msg: RelayMessage): void {
 function sendChannelList(client: Client): void {
   const list: ChannelList = {
     type: "channel_list",
-    channels: [...channelRegistry.entries()].map(([id, info]) => ({
-      id,
-      name: info.name,
-      agentStatus: info.agentStatus,
-      pendingPermission: info.pendingPermission,
-    })),
+    channels: [...channelRegistry.entries()]
+      .filter(([, info]) => info.token === client.token)
+      .map(([id, info]) => ({
+        id,
+        name: info.name,
+        agentStatus: info.agentStatus,
+        pendingPermission: info.pendingPermission,
+      })),
   };
   send(client.ws, list);
 }
 
-function broadcastChannelList(): void {
+function broadcastChannelList(token?: string): void {
   for (const c of clients) {
-    if (c.authenticated) sendChannelList(c);
+    if (c.authenticated) {
+      if (token && c.token !== token) continue;
+      sendChannelList(c);
+    }
   }
 }
 
@@ -332,8 +350,8 @@ function broadcastChannelUpdate(channel: string): void {
     agentStatus: info.agentStatus,
     pendingPermission: info.pendingPermission,
   };
-  broadcastToApps(msg);
-  broadcastToBots(msg);
+  broadcastToApps(msg, info.token);
+  broadcastToBots(msg, info.token);
 }
 
 // --- Start ---
