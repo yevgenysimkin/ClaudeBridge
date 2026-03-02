@@ -3,7 +3,7 @@ export type RelayMessageHandler = (msg: Record<string, unknown>) => void;
  * WebSocket client that connects to the ClaudeBridge relay.
  * Handles auth, reconnection, and message routing.
  *
- * All logging goes to a file (not stderr) to avoid corrupting the PTY TUI.
+ * All logging goes to a file to keep stdout clean.
  */
 export declare class RelayClient {
     private ws;
@@ -24,6 +24,11 @@ export declare class RelayClient {
     send(msg: Record<string, unknown>): void;
     /** Register a channel with the relay. Remembers registration for auto-re-register on reconnect. */
     registerChannel(channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void;
+    /** Send a structured agent event to the relay. */
+    sendAgentEvent(channel: string, kind: string, data: Record<string, unknown>, options?: {
+        isFinal?: boolean;
+        requestId?: string;
+    }): void;
     /** Whether the client is connected and authenticated. */
     get isConnected(): boolean;
     /** Disconnect and stop reconnecting. */

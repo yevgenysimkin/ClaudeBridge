@@ -12,6 +12,9 @@ import com.claudebridge.ClaudeBridgeApp
 import com.claudebridge.MainActivity
 import com.claudebridge.R
 import com.claudebridge.data.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Foreground service that keeps the WebSocket connection alive.
@@ -189,6 +192,36 @@ class RelayService : Service(), RelayClient.Listener {
 
     override fun onPing(pingId: String) {
         // Pong is auto-sent by RelayClient
+    }
+
+    override fun onAuthFailed(error: String) {
+        val prefs = Preferences(this)
+        updateConnectionNotification("Auth failed — refreshing token...")
+
+        ChromatticaApi.reportEvent(
+            "relay_auth_failed",
+            mapOf("relayUrl" to prefs.relayUrl, "error" to error),
+            prefs.email
+        )
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val result = ChromatticaApi.refreshConfig(prefs.sessionToken, prefs.authToken)
+            if (result is ConfigRefreshResult.Success && result.tokenChanged) {
+                prefs.relayUrl = result.relayUrl
+                prefs.authToken = result.relayAuthToken
+                relayClient?.retryAuth(result.relayAuthToken)
+
+                ChromatticaApi.reportEvent(
+                    "token_mismatch_resolved",
+                    mapOf("relayUrl" to result.relayUrl),
+                    prefs.email
+                )
+            } else {
+                // Token didn't change or refresh failed — report to user
+                BridgeState.setError("Relay auth failed: $error")
+                updateConnectionNotification("Auth failed")
+            }
+        }
     }
 
     override fun onError(error: String) {

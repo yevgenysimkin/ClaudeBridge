@@ -7,6 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import android.util.Log
 import java.util.concurrent.TimeUnit
 
 /**
@@ -19,6 +20,7 @@ object ChromatticaApi {
     private const val REQUEST_OTP_PATH = "/api/auth/request-otp"
     private const val VERIFY_OTP_PATH = "/api/auth/verify-otp"
     private const val SYNC_PATH = "/api/auth/sync"
+    private const val TELEMETRY_PATH = "/api/telemetry/event"
     private const val TIMEOUT_SECONDS = 15L
 
     private val client = OkHttpClient.Builder()
@@ -53,8 +55,14 @@ object ChromatticaApi {
         }
     }
 
-    /** Refresh ClaudeBridge config from server using existing session token. */
-    suspend fun refreshConfig(sessionToken: String): ConfigRefreshResult = withContext(Dispatchers.IO) {
+    /**
+     * Refresh ClaudeBridge config from server using existing session token.
+     * Pass current auth token so we can detect if the server's token differs.
+     */
+    suspend fun refreshConfig(
+        sessionToken: String,
+        currentAuthToken: String = ""
+    ): ConfigRefreshResult = withContext(Dispatchers.IO) {
         val body = JSONObject().toString().toRequestBody(JSON_MEDIA_TYPE)
 
         val request = Request.Builder()
@@ -63,27 +71,60 @@ object ChromatticaApi {
             .header("Authorization", "Bearer $sessionToken")
             .build()
 
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string() ?: "{}"
-        val json = JSONObject(responseBody)
+        try {
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string() ?: "{}"
+            val json = JSONObject(responseBody)
 
-        when {
-            response.isSuccessful -> {
-                val account = json.getJSONObject("account")
-                val cbConfig = account.optJSONObject("claudebridgeConfig")
+            when {
+                response.isSuccessful -> {
+                    val account = json.getJSONObject("account")
+                    val cbConfig = account.optJSONObject("claudebridgeConfig")
 
-                val relayUrl = cbConfig?.optString("relayUrl", "") ?: ""
-                val authToken = cbConfig?.optString("relayAuthToken", "") ?: ""
+                    val relayUrl = cbConfig?.optString("relayUrl", "") ?: ""
+                    val authToken = cbConfig?.optString("relayAuthToken", "") ?: ""
 
-                ConfigRefreshResult.Success(relayUrl, authToken)
+                    ConfigRefreshResult.Success(
+                        relayUrl = relayUrl,
+                        relayAuthToken = authToken,
+                        serverHadRelayUrl = relayUrl.isNotBlank(),
+                        serverHadAuthToken = authToken.isNotBlank(),
+                        tokenChanged = currentAuthToken.isNotBlank() && authToken.isNotBlank()
+                                && currentAuthToken != authToken
+                    )
+                }
+                response.code == 401 -> {
+                    ConfigRefreshResult.SessionExpired
+                }
+                else -> {
+                    ConfigRefreshResult.Error(json.optString("error", "Sync failed"))
+                }
             }
-            response.code == 401 -> {
-                ConfigRefreshResult.SessionExpired
-            }
-            else -> {
-                ConfigRefreshResult.Error(json.optString("error", "Sync failed"))
-            }
+        } catch (e: Exception) {
+            ConfigRefreshResult.NetworkError(e.message ?: "Unknown network error")
         }
+    }
+
+    /** Fire-and-forget telemetry event. Never throws. */
+    fun reportEvent(event: String, data: Map<String, Any?> = emptyMap(), email: String? = null) {
+        Thread {
+            try {
+                val payload = JSONObject().apply {
+                    put("source", "android")
+                    put("event", event)
+                    put("data", JSONObject(data))
+                    if (email != null) put("email", email)
+                }
+                val body = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
+                val request = Request.Builder()
+                    .url("$BASE_URL$TELEMETRY_PATH")
+                    .post(body)
+                    .build()
+                client.newCall(request).execute().close()
+            } catch (e: Exception) {
+                Log.d("ChromatticaApi", "Telemetry send failed: ${e.message}")
+            }
+        }.start()
     }
 
     /** Verify an OTP code and return session + account data. */
@@ -149,7 +190,14 @@ sealed class OtpVerifyResult {
 }
 
 sealed class ConfigRefreshResult {
-    data class Success(val relayUrl: String, val relayAuthToken: String) : ConfigRefreshResult()
+    data class Success(
+        val relayUrl: String,
+        val relayAuthToken: String,
+        val serverHadRelayUrl: Boolean,
+        val serverHadAuthToken: Boolean,
+        val tokenChanged: Boolean
+    ) : ConfigRefreshResult()
     data object SessionExpired : ConfigRefreshResult()
     data class Error(val message: String) : ConfigRefreshResult()
+    data class NetworkError(val message: String) : ConfigRefreshResult()
 }

@@ -10,6 +10,8 @@ export function loadEnvConfig() {
     return {
         relayUrl: requireEnv("RELAY_URL"),
         relayAuthToken: requireEnv("RELAY_AUTH_TOKEN"),
+        model: process.env.CLAUDE_MODEL || "sonnet",
+        permissionMode: process.env.PERMISSION_MODE || "default",
     };
 }
 //# sourceMappingURL=config.js.map

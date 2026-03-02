@@ -262,14 +262,6 @@ function mapCliMessageToEvents(
       break;
     }
 
-    // Feature 7: Permission events from CLI.
-    // The `claude` CLI with --permission-mode default may emit permission request
-    // messages as JSONL. If so, they'd appear here as an unknown type.
-    // TODO: Test with `--permission-mode default` to determine if permission events
-    // are emitted. If they are, wire them through PermissionRouter → relay → clients.
-    // If not, --permission-mode plan (read-only) is the safest fallback, with
-    // AskUserQuestion events still relayed for user interaction.
-
     default:
       // user echo, auth_status, etc. — silently skip
       break;
@@ -347,6 +339,7 @@ function spawnClaude(config: {
     "--include-partial-messages",
     "--model", config.model,
     "--permission-mode", config.permissionMode,
+    "--permission-prompt-tool", "stdio",
   ];
 
   if (config.sessionId) {
@@ -371,10 +364,57 @@ function spawnClaude(config: {
 }
 
 /** Write a user message to the claude process stdin in stream-json input format. */
-function sendPromptToProcess(child: ChildProcess, text: string): void {
+function sendPromptToProcess(child: ChildProcess, text: string, attachments?: FileAttachment[]): void {
+  // Build content: plain string for text-only, array of blocks for multimodal
+  const imageAtts = attachments?.filter(a => a.mimeType.startsWith("image/")) || [];
+  const nonImageAtts = attachments?.filter(a => !a.mimeType.startsWith("image/")) || [];
+
+  if (imageAtts.length === 0 && nonImageAtts.length === 0) {
+    // Text-only — simple string content
+    const msg = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: text },
+    });
+    child.stdin?.write(msg + "\n");
+    return;
+  }
+
+  // Multimodal — build content block array
+  const content: Array<Record<string, unknown>> = [];
+
+  // Add image blocks so Claude can actually see them
+  for (const img of imageAtts) {
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: img.mimeType,
+        data: img.data,
+      },
+    });
+  }
+
+  // For non-image files, reference disk paths in text
+  let fullText = text;
+  if (nonImageAtts.length > 0) {
+    const fileList = nonImageAtts
+      .map(a => {
+        const safeName = a.filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+        return `- ${join(UPLOAD_DIR, safeName)}`;
+      })
+      .join("\n");
+    fullText = fullText
+      ? `${fullText}\n\nAttached files:\n${fileList}`
+      : `Please examine these files:\n${fileList}`;
+  }
+
+  if (fullText) {
+    content.push({ type: "text", text: fullText });
+  }
+
   const msg = JSON.stringify({
     type: "user",
-    message: { role: "user", content: text },
+    message: { role: "user", content },
   });
   child.stdin?.write(msg + "\n");
 }
@@ -454,6 +494,50 @@ async function main(): Promise<void> {
       log(`Turn complete. Cost: $${(msg.total_cost_usd as number)?.toFixed(4)}`);
     }
 
+    // Handle permission requests from CLI (control_request with canUseTool)
+    if (msg.type === "control_request") {
+      const requestId = msg.request_id as string;
+      const request = msg.request as Record<string, unknown>;
+      if (request?.subtype === "can_use_tool") {
+        log(`Permission request: ${requestId} tool=${request.tool_name}`);
+
+        // Route to clients via PermissionRouter — awaits user response
+        permissionRouter.requestPermission(requestId, {
+          toolName: request.tool_name,
+          toolUseId: request.tool_use_id,
+          input: request.input,
+          decisionReason: request.decision_reason,
+        }).then((behavior) => {
+          // Send control_response back to CLI stdin
+          const response = JSON.stringify({
+            type: "control_response",
+            response: {
+              subtype: "success",
+              request_id: requestId,
+              response: behavior === "allow"
+                ? { behavior: "allow", updatedInput: request.input, updatedPermissions: [], toolUseID: request.tool_use_id }
+                : { behavior: "deny", message: "User denied permission", toolUseID: request.tool_use_id },
+            },
+          });
+          child.stdin?.write(response + "\n");
+          log(`Permission response sent: ${requestId} → ${behavior}`);
+
+          // Notify clients the permission is resolved
+          relay.sendAgentEvent(channel, "permission_resolved", {}, { requestId });
+        });
+      }
+      return; // Don't pass control_request to mapCliMessageToEvents
+    }
+
+    // Handle control_cancel_request (CLI cancelled a pending permission)
+    if (msg.type === "control_cancel_request") {
+      const cancelId = msg.request_id as string;
+      log(`Permission cancelled by CLI: ${cancelId}`);
+      permissionRouter.handleResponse(cancelId, "deny");
+      relay.sendAgentEvent(channel, "permission_resolved", {}, { requestId: cancelId });
+      return;
+    }
+
     mapCliMessageToEvents(msg, channel, relay, batcher);
   });
 
@@ -470,14 +554,10 @@ async function main(): Promise<void> {
       const attachments = (msg as Record<string, unknown>).attachments as FileAttachment[] | undefined;
 
       if (attachments?.length) {
-        // Write files to disk, then send prompt referencing file paths
-        const paths = writeAttachments(channel, attachments);
-        const fileList = paths.map(p => `- ${p}`).join("\n");
-        const augmentedText = text
-          ? `${text}\n\nAttached files:\n${fileList}`
-          : `Please examine these files:\n${fileList}`;
-        log(`User prompt with ${paths.length} attachment(s): ${augmentedText.slice(0, 120)}`);
-        sendPromptToProcess(child, augmentedText);
+        // Write all files to disk (for non-image reference and persistence)
+        writeAttachments(channel, attachments);
+        log(`User prompt with ${attachments.length} attachment(s), sending as content blocks`);
+        sendPromptToProcess(child, text, attachments);
       } else {
         log(`User prompt received: ${text.slice(0, 80)}`);
         sendPromptToProcess(child, text);

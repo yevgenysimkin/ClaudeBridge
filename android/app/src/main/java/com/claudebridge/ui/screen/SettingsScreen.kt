@@ -17,7 +17,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import android.widget.Toast
 import com.claudebridge.data.ChromatticaApi
 import com.claudebridge.data.ConfigRefreshResult
 import com.claudebridge.data.OtpRequestResult
@@ -27,6 +26,12 @@ import com.claudebridge.ui.theme.*
 import kotlinx.coroutines.launch
 
 private const val OTP_CODE_LENGTH = 6
+
+/** Severity level for refresh status feedback. */
+enum class RefreshLevel { SUCCESS, WARNING, ERROR }
+
+/** Inline status card state after a config refresh. */
+data class RefreshStatus(val level: RefreshLevel, val message: String)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -182,6 +187,7 @@ fun SettingsScreen(
                     var currentRelayUrl by remember { mutableStateOf(prefs.relayUrl) }
                     var currentIsConfigured by remember { mutableStateOf(prefs.isConfigured) }
                     var hasAuthToken by remember { mutableStateOf(prefs.authToken.isNotBlank()) }
+                    var refreshStatus by remember { mutableStateOf<RefreshStatus?>(null) }
 
                     AccountPage(
                         email = prefs.email,
@@ -189,34 +195,80 @@ fun SettingsScreen(
                         connected = connected,
                         isConfigured = currentIsConfigured,
                         hasAuthToken = hasAuthToken,
+                        refreshStatus = refreshStatus,
                         onConnect = onConnect,
                         onDisconnect = onDisconnect,
                         onRefresh = {
                             scope.launch {
                                 isLoading = true
-                                when (val result = ChromatticaApi.refreshConfig(prefs.sessionToken)) {
+                                refreshStatus = null
+                                when (val result = ChromatticaApi.refreshConfig(
+                                    prefs.sessionToken,
+                                    prefs.authToken
+                                )) {
                                     is ConfigRefreshResult.Success -> {
                                         prefs.relayUrl = result.relayUrl
                                         prefs.authToken = result.relayAuthToken
                                         currentRelayUrl = result.relayUrl
                                         currentIsConfigured = prefs.isConfigured
                                         hasAuthToken = result.relayAuthToken.isNotBlank()
-                                        val msg = when {
-                                            prefs.isConfigured -> "Config updated"
-                                            hasAuthToken -> "Auth token synced — no relay URL yet"
-                                            else -> "No config on server yet"
+
+                                        val tokenNote = if (result.tokenChanged)
+                                            "\nAuth token updated (was out of sync with server)" else ""
+
+                                        refreshStatus = when {
+                                            result.serverHadRelayUrl && result.serverHadAuthToken ->
+                                                RefreshStatus(
+                                                    RefreshLevel.SUCCESS,
+                                                    "Config synced — relay URL: ${result.relayUrl}$tokenNote"
+                                                )
+                                            result.serverHadAuthToken ->
+                                                RefreshStatus(
+                                                    RefreshLevel.WARNING,
+                                                    "Server has auth token but no relay URL — open ClaudeBridge settings in Chromattica$tokenNote"
+                                                )
+                                            else ->
+                                                RefreshStatus(
+                                                    RefreshLevel.WARNING,
+                                                    "Server has no ClaudeBridge config — configure relay URL in Chromattica first"
+                                                )
                                         }
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                         if (prefs.isConfigured && !connected) onConnect()
                                     }
                                     is ConfigRefreshResult.SessionExpired -> {
-                                        Toast.makeText(context, "Session expired — please sign in again", Toast.LENGTH_SHORT).show()
+                                        refreshStatus = RefreshStatus(
+                                            RefreshLevel.ERROR,
+                                            "Session expired — please sign in again"
+                                        )
+                                        ChromatticaApi.reportEvent(
+                                            "config_refresh_failed",
+                                            mapOf("httpStatus" to 401, "error" to "session_expired"),
+                                            prefs.email
+                                        )
                                         prefs.clear()
                                         page = "email"
                                         email = ""
                                     }
                                     is ConfigRefreshResult.Error -> {
-                                        Toast.makeText(context, "Error: ${result.message}", Toast.LENGTH_SHORT).show()
+                                        refreshStatus = RefreshStatus(
+                                            RefreshLevel.ERROR,
+                                            "Sync error: ${result.message}"
+                                        )
+                                        ChromatticaApi.reportEvent(
+                                            "config_refresh_failed",
+                                            mapOf("error" to result.message),
+                                            prefs.email
+                                        )
+                                    }
+                                    is ConfigRefreshResult.NetworkError -> {
+                                        refreshStatus = RefreshStatus(
+                                            RefreshLevel.ERROR,
+                                            "Network error: Unable to reach api.chromattica.com"
+                                        )
+                                        ChromatticaApi.reportEvent(
+                                            "config_refresh_failed",
+                                            mapOf("error" to result.message, "network" to true)
+                                        )
                                     }
                                 }
                                 isLoading = false
@@ -411,6 +463,7 @@ private fun AccountPage(
     connected: Boolean,
     isConfigured: Boolean,
     hasAuthToken: Boolean,
+    refreshStatus: RefreshStatus?,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit,
@@ -541,6 +594,27 @@ private fun AccountPage(
             )
         } else {
             Text("Refresh config")
+        }
+    }
+
+    // Inline status card — replaces Toasts
+    if (refreshStatus != null) {
+        val (bgColor, textColor) = when (refreshStatus.level) {
+            RefreshLevel.SUCCESS -> Pair(ApproveGreen.copy(alpha = 0.15f), ApproveGreen)
+            RefreshLevel.WARNING -> Pair(PermissionPending.copy(alpha = 0.15f), PermissionPending)
+            RefreshLevel.ERROR -> Pair(DenyRed.copy(alpha = 0.15f), DenyRed)
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = bgColor),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(
+                refreshStatus.message,
+                modifier = Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor
+            )
         }
     }
 

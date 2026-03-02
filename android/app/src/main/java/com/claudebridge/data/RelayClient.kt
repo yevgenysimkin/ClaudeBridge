@@ -18,11 +18,14 @@ class RelayClient(
         fun onHistorySync(channel: String, messages: List<AgentMessage>)
         fun onPing(pingId: String)
         fun onError(error: String)
+        /** Called when relay auth fails. Service can refresh token and call retryAuth(). */
+        fun onAuthFailed(error: String) {}
     }
 
     var listener: Listener? = null
     private var webSocket: WebSocket? = null
     private var connected = false
+    private var authRetried = false
     private val client = OkHttpClient.Builder()
         .pingInterval(30, TimeUnit.SECONDS)
         .build()
@@ -156,6 +159,18 @@ class RelayClient(
         webSocket?.send(msg.toString())
     }
 
+    /** Retry auth with a new token (e.g., after config refresh). Limit: 1 retry. */
+    fun retryAuth(newToken: String) {
+        if (authRetried) return
+        authRetried = true
+        val auth = JSONObject().apply {
+            put("type", "auth")
+            put("token", newToken)
+            put("clientType", "app")
+        }
+        webSocket?.send(auth.toString())
+    }
+
     val isConnected: Boolean get() = connected
 
     // --- Private ---
@@ -165,9 +180,11 @@ class RelayClient(
             "auth_result" -> {
                 if (json.getBoolean("success")) {
                     connected = true
+                    authRetried = false
                     listener?.onConnected()
                 } else {
-                    listener?.onError("Auth failed: ${json.optString("error")}")
+                    val error = json.optString("error", "unknown")
+                    listener?.onAuthFailed(error)
                 }
             }
 
