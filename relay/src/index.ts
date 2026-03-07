@@ -18,6 +18,7 @@ const AUTH_TOKEN = process.env.RELAY_AUTH_TOKEN;  // optional — if unset, any 
 const AUTH_TIMEOUT_MS = 10_000;
 const RING_BUFFER_SIZE = 500; // events per channel
 const MAX_PAYLOAD_BYTES = 20 * 1024 * 1024; // 20MB for file uploads
+const BOT_DISCONNECT_GRACE_MS = 60_000; // 60s grace before cleaning up channels
 
 if (!AUTH_TOKEN) {
   console.log("[relay] RELAY_AUTH_TOKEN not set — accepting any non-empty token (pairing mode).");
@@ -44,6 +45,9 @@ const channelRegistry = new Map<string, {
 
 // Per-channel structured event buffer for SDK orchestrator
 const channelEvents = new Map<string, AgentEvent[]>();
+
+// Grace timers: channel → timeout handle (bot disconnect → delayed cleanup)
+const channelGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // --- HTTP server ---
 const server = createServer((req, res) => {
@@ -130,15 +134,39 @@ wss.on("connection", (ws) => {
     clients.delete(client);
     clearTimeout(authTimer);
 
-    // Auto-cleanup: remove channels owned by this bot
+    // Bot disconnect: start grace timer instead of nuking channels immediately.
+    // If the bot reconnects and re-registers before the timer fires, the
+    // channel and its history survive intact.
     if (client.clientType === "bot" && client.ownedChannels.size > 0) {
       for (const channel of client.ownedChannels) {
-        channelRegistry.delete(channel);
-        channelEvents.delete(channel);
-        console.log(`[relay] Auto-removed channel: ${channel} (bot disconnected)`);
+        // Cancel any existing grace timer for this channel (e.g., rapid reconnect cycle)
+        const existing = channelGraceTimers.get(channel);
+        if (existing) clearTimeout(existing);
+
+        const timer = setTimeout(() => {
+          channelGraceTimers.delete(channel);
+          // Only clean up if no bot has re-claimed this channel
+          const info = channelRegistry.get(channel);
+          if (!info) return;  // already removed by explicit remove_channel
+          // Check if any connected bot now owns this channel
+          let reclaimed = false;
+          for (const c of clients) {
+            if (c.authenticated && c.clientType === "bot" && c.ownedChannels.has(channel)) {
+              reclaimed = true;
+              break;
+            }
+          }
+          if (!reclaimed) {
+            channelRegistry.delete(channel);
+            channelEvents.delete(channel);
+            console.log(`[relay] Grace period expired — removed channel: ${channel}`);
+            broadcastChannelList(info.token);
+          }
+        }, BOT_DISCONNECT_GRACE_MS);
+
+        channelGraceTimers.set(channel, timer);
+        console.log(`[relay] Bot disconnected — grace timer started for channel: ${channel} (${BOT_DISCONNECT_GRACE_MS / 1000}s)`);
       }
-      // Only notify clients with the same token
-      broadcastChannelList(client.token);
     }
 
     console.log(`[relay] ${client.clientType} disconnected. Clients: ${clients.size}`);
@@ -188,6 +216,15 @@ function handleAuth(client: Client, msg: AuthMessage): void {
 
 function handleRegisterChannel(client: Client, channel: string, name: string, agentStatus: "running" | "stopped" | "idle"): void {
   client.ownedChannels.add(channel);
+
+  // Cancel grace timer if bot is reclaiming a channel after disconnect
+  const graceTimer = channelGraceTimers.get(channel);
+  if (graceTimer) {
+    clearTimeout(graceTimer);
+    channelGraceTimers.delete(channel);
+    console.log(`[relay] Grace timer cancelled — bot reclaimed channel: ${channel}`);
+  }
+
   const existing = channelRegistry.get(channel);
   if (existing) {
     existing.name = name;
