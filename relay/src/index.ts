@@ -76,14 +76,17 @@ const channelEvents = new Map<string, AgentEvent[]>();
 const channelTermBuffers = new Map<string, { chunks: TermData[]; totalBytes: number }>();
 
 // Approximate raw byte count of a base64 string without allocating a Buffer.
-// Each 4 base64 chars decode to 3 bytes, minus padding.
+// Each 4 base64 chars decode to 3 bytes, minus '=' padding chars (max 2).
+const BASE64_PADDING_CHAR_CODE = 61; // '='.charCodeAt(0)
+const BASE64_CHARS_PER_BLOCK = 4;
+const BASE64_BYTES_PER_BLOCK = 3;
 function approxBase64DecodedBytes(b64: string): number {
   const len = b64.length;
   if (len === 0) return 0;
   let padding = 0;
-  if (b64.charCodeAt(len - 1) === 61) padding++;
-  if (b64.charCodeAt(len - 2) === 61) padding++;
-  return Math.floor((len * 3) / 4) - padding;
+  if (b64.charCodeAt(len - 1) === BASE64_PADDING_CHAR_CODE) padding++;
+  if (b64.charCodeAt(len - 2) === BASE64_PADDING_CHAR_CODE) padding++;
+  return Math.floor((len * BASE64_BYTES_PER_BLOCK) / BASE64_CHARS_PER_BLOCK) - padding;
 }
 
 // Grace timers: channel → timeout handle (bot disconnect → delayed cleanup)
