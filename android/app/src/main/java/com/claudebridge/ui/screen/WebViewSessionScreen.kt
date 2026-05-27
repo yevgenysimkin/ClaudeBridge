@@ -5,7 +5,10 @@ import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
@@ -20,9 +23,18 @@ fun WebViewSessionScreen(
     channelName: String,
     onBack: () -> Unit
 ) {
+    // Android 15+ defaults to edge-to-edge, so the WebView would draw under
+    // the system status bar (and bottom gesture pill) and collide with the
+    // session header. Reserve the system-bar insets for the WebView.
     AndroidView(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.systemBars),
         factory = { context ->
+            // Expose every WebView in the app to chrome://inspect when the
+            // debug build is installed. Cheap to leave on for release too — it
+            // does nothing unless USB debugging is active.
+            WebView.setWebContentsDebuggingEnabled(true)
             WebView(context).apply {
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,

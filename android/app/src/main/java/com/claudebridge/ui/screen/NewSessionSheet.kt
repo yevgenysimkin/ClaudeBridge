@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.sp
 import com.claudebridge.data.DirectoryListing
 import com.claudebridge.data.Preferences
 import com.claudebridge.ui.theme.*
+import kotlinx.coroutines.delay
 
 /**
  * Modal bottom sheet for provoking a remote ClaudeBridge session.
@@ -27,6 +28,8 @@ import com.claudebridge.ui.theme.*
  * and hit Start. On a successful remote_session_started reply, the caller
  * navigates straight into the new session's xterm view.
  */
+
+private const val START_TIMEOUT_MS = 15_000L
 
 private data class ModelOption(val id: String, val label: String)
 
@@ -43,12 +46,15 @@ fun NewSessionSheet(
     allowedRoot: String,
     currentDirListing: DirectoryListing?,
     onBrowseTo: (path: String?) -> Unit,
+    // Returns the requestId so the sheet can cancel it on timeout/dismiss
+    // (so a late reply doesn't fire onSessionStarted after the user gave up).
     onStart: (
         projectDir: String,
         model: String,
         skipPermissions: Boolean,
         onResolved: (channelId: String?, error: String?) -> Unit
-    ) -> Unit,
+    ) -> String,
+    onCancelStart: (requestId: String) -> Unit,
     onSessionStarted: (channelId: String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -61,9 +67,26 @@ fun NewSessionSheet(
     var modelMenuOpen by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
     var startError by remember { mutableStateOf<String?>(null) }
+    var pendingRequestId by remember { mutableStateOf("") }
 
     // First open of the sheet: kick off a listing at the allowed root.
     LaunchedEffect(Unit) { onBrowseTo(null) }
+
+    // Timeout: if the desktop doesn't reply within START_TIMEOUT_MS, give the
+    // user back control instead of leaving them staring at a "Starting…"
+    // spinner that intercepts every tap on the channel list behind the sheet.
+    // Most likely cause is a phone WS drop that lost the reply in transit.
+    LaunchedEffect(starting) {
+        if (!starting) return@LaunchedEffect
+        delay(START_TIMEOUT_MS)
+        if (starting) {
+            onCancelStart(pendingRequestId)
+            pendingRequestId = ""
+            starting = false
+            startError = "Desktop didn't reply within ${START_TIMEOUT_MS / 1000}s. " +
+                "Make sure Chromattica is running and connected, then try again."
+        }
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -230,7 +253,8 @@ fun NewSessionSheet(
                     // Persist choices so the next open of the sheet defaults to them.
                     prefs.lastModel = selectedModel
                     prefs.skipPermsPreference = skipPerms
-                    onStart(path, selectedModel, skipPerms) { channelId, error ->
+                    pendingRequestId = onStart(path, selectedModel, skipPerms) { channelId, error ->
+                        pendingRequestId = ""
                         starting = false
                         if (channelId != null) {
                             onSessionStarted(channelId)

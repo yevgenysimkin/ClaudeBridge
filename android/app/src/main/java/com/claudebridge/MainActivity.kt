@@ -122,6 +122,7 @@ fun ClaudeBridgeNavHost() {
                     onStart = { projectDir, model, skipPerms, onResolved ->
                         vm.remoteStartSession(projectDir, model, skipPerms, onResolved)
                     },
+                    onCancelStart = { requestId -> vm.cancelStartRequest(requestId) },
                     onSessionStarted = { channelId ->
                         showNewSessionSheet = false
                         vm.selectChannel(channelId)

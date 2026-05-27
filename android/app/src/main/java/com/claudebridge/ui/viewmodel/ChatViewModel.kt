@@ -5,7 +5,9 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import com.claudebridge.data.BridgeState
 import com.claudebridge.data.Preferences
@@ -22,6 +24,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = Preferences(application)
     private var service: RelayService? = null
     private var bound = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val _currentChannel = MutableStateFlow<String?>(null)
     val currentChannel: StateFlow<String?> = _currentChannel
@@ -128,20 +131,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Provoke a new CB session on the connected desktop. Resolves the
      * callback with (channelId, error) — one of them will be non-null.
+     * Returns the requestId so the caller can cancel the in-flight request
+     * (timeout, dismiss) without leaving a stale callback that would fire
+     * late and surprise the user.
      */
     fun remoteStartSession(
         projectDir: String,
         model: String?,
         skipPermissions: Boolean,
         onResolved: (channelId: String?, error: String?) -> Unit
-    ) {
+    ): String {
         val svc = service ?: run {
             onResolved(null, "Not connected to relay service")
-            return
+            return ""
         }
         val requestId = java.util.UUID.randomUUID().toString()
-        BridgeState.registerStartRequest(requestId, onResolved)
+        // The relay reply arrives on OkHttp's IO thread. The caller's callback
+        // touches Compose state and navController.navigate(), both of which
+        // require the main thread — so marshal there before invoking.
+        BridgeState.registerStartRequest(requestId) { chId, err ->
+            mainHandler.post { onResolved(chId, err) }
+        }
         svc.remoteStartSession(requestId, projectDir, model, skipPermissions)
+        return requestId
+    }
+
+    /** Cancel a pending remote-start request (timeout, dismiss). */
+    fun cancelStartRequest(requestId: String) {
+        if (requestId.isEmpty()) return
+        BridgeState.clearStartRequest(requestId)
     }
 
     private fun unbind() {

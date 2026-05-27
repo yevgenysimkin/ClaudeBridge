@@ -45,6 +45,43 @@ body {
     color: #ff8a8a; padding: 4px 10px; border-radius: 4px; font-size: 12px;
 }
 .stop-btn.visible { display: inline-block; }
+.kebab-btn {
+    background: none; border: none; color: #cccccc; cursor: pointer;
+    font-size: 22px; line-height: 1; padding: 4px 10px; border-radius: 4px;
+}
+.kebab-wrap { position: relative; }
+.kebab-menu {
+    display: none; position: absolute; top: calc(100% + 4px); right: 0;
+    background: #2a2a2a; border: 1px solid #444; border-radius: 6px;
+    min-width: 160px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 10;
+}
+.kebab-menu.open { display: block; }
+.kebab-item {
+    display: block; width: 100%; background: none; border: none;
+    text-align: left; color: #ff8a8a; padding: 10px 14px; font-size: 14px;
+    cursor: pointer;
+}
+.kebab-item:hover, .kebab-item:active { background: #3a3a3a; }
+.modal-backdrop {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); z-index: 100;
+    align-items: center; justify-content: center;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+    background: #2a2a2a; border: 1px solid #444; border-radius: 8px;
+    min-width: 280px; max-width: 360px; padding: 18px 18px 14px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5); color: #ddd;
+}
+.modal-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: #fff; }
+.modal-body { font-size: 13px; line-height: 1.4; margin-bottom: 16px; color: #bbb; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-btn {
+    background: none; border: 1px solid #555; color: #ddd;
+    padding: 6px 14px; border-radius: 4px; font-size: 13px; cursor: pointer;
+}
+.modal-btn.danger { border-color: #ff8a8a; color: #ff8a8a; }
+.modal-btn:active { background: #3a3a3a; }
 .connection-banner {
     display: none; padding: 8px 16px; text-align: center; font-size: 13px;
     background: #4a2d2d; color: #ff8a8a; flex-shrink: 0;
@@ -65,9 +102,26 @@ body {
     <span class="session-title" id="sessionTitle">Session</span>
     <span class="session-status-badge" id="statusBadge" style="display:none;"></span>
     <button class="stop-btn" id="stopBtn" onclick="sendInterrupt()">Stop</button>
+    <div class="kebab-wrap">
+        <button class="kebab-btn" id="kebabBtn" onclick="toggleKebab(event)" aria-label="More">&#x22EE;</button>
+        <div class="kebab-menu" id="kebabMenu">
+            <button class="kebab-item" onclick="confirmKillSession()">Kill session</button>
+        </div>
+    </div>
 </div>
 
 <div class="connection-banner" id="connBanner">Reconnecting to relay&hellip;</div>
+
+<div class="modal-backdrop" id="killModal">
+    <div class="modal" role="dialog" aria-labelledby="killModalTitle">
+        <div class="modal-title" id="killModalTitle">End this session?</div>
+        <div class="modal-body">Claude's process will be terminated and the channel removed from Chromattica.</div>
+        <div class="modal-actions">
+            <button class="modal-btn" onclick="closeKillModal()">Cancel</button>
+            <button class="modal-btn danger" onclick="doKillSession()">End session</button>
+        </div>
+    </div>
+</div>
 
 <div id="terminal"></div>
 
@@ -213,6 +267,12 @@ function handleRelayMessage(msg) {
             reconnectDelay = RECONNECT_BASE_MS;
             setConnectionBanner(false);
             startPingLoop();
+            // CRITICAL on mobile: tell the PTY what size we actually are.
+            // The ResizeObserver only fires on dimension *changes*, so the
+            // initial layout's cols/rows are never sent unless we do it here.
+            // Without this, the PTY defaults to 80x24 and Claude's TUI wraps
+            // for a desktop terminal — unreadable on a phone.
+            sendCurrentSize();
         } else {
             setConnectionBanner(true);
         }
@@ -252,6 +312,18 @@ function handleRelayMessage(msg) {
     }
 }
 
+function sendCurrentSize() {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !channelId || !term) return;
+    try { fitAddon && fitAddon.fit(); } catch (_) {}
+    ws.send(JSON.stringify({
+        type: 'term_resize',
+        channel: channelId,
+        cols: term.cols,
+        rows: term.rows,
+        timestamp: Date.now(),
+    }));
+}
+
 function startPingLoop() {
     clearInterval(pingInterval);
     pingInterval = setInterval(() => {
@@ -270,9 +342,65 @@ function sendInterrupt() {
     }));
 }
 
+const KILL_FLUSH_DELAY_MS = 150;
+
+function toggleKebab(evt) {
+    if (evt) evt.stopPropagation();
+    const menu = document.getElementById('kebabMenu');
+    if (menu) menu.classList.toggle('open');
+}
+
+function closeKebab() {
+    const menu = document.getElementById('kebabMenu');
+    if (menu) menu.classList.remove('open');
+}
+
+document.addEventListener('click', (evt) => {
+    const wrap = evt.target.closest && evt.target.closest('.kebab-wrap');
+    if (!wrap) closeKebab();
+});
+
+function confirmKillSession() {
+    // Custom modal because Android WebView swallows window.confirm() unless a
+    // WebChromeClient is wired up — silent swallow returns false, which
+    // short-circuits the kill path entirely.
+    closeKebab();
+    const m = document.getElementById('killModal');
+    if (m) m.classList.add('open');
+}
+
+function closeKillModal() {
+    const m = document.getElementById('killModal');
+    if (m) m.classList.remove('open');
+}
+
+function doKillSession() {
+    closeKillModal();
+    if (!ws || ws.readyState !== WebSocket.OPEN || !channelId) {
+        goBack();
+        return;
+    }
+    ws.send(JSON.stringify({ type: 'remove_channel', channel: channelId }));
+    // Give the WS a beat to flush before the WebView is torn down by goBack.
+    setTimeout(goBack, KILL_FLUSH_DELAY_MS);
+}
+
+// Boot path:
+//   1. WebView loads this HTML → `load` fires → we set up the terminal but do
+//      NOT connect yet, because we don't have relay credentials.
+//   2. Kotlin's onPageFinished injects __cbConfig and calls __cbInit, which
+//      runs connect() with the freshly-set config.
+//   3. If __cbInit is somehow never called (no bridge present, e.g. opened in
+//      a normal browser for debugging), the polling fallback in connect() will
+//      retry every 300ms until __cbConfig appears.
+window.__cbInit = function () {
+    if (!term) initTerminal();
+    connect();
+};
+
 window.addEventListener('load', () => {
     initTerminal();
-    connect();
+    if (window.__cbConfig) connect();
 });
 </script>
 </body>

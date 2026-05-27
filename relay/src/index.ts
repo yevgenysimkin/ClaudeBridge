@@ -21,14 +21,30 @@ import type {
 
 // --- Config ---
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const AUTH_TOKEN = process.env.RELAY_AUTH_TOKEN;  // optional — if unset, any non-empty token is accepted
+const AUTH_TOKEN = process.env.RELAY_AUTH_TOKEN;  // if unset, see ALLOW_PAIRING below
+// "Pairing mode" (AUTH_TOKEN unset) accepts any non-empty token and scopes
+// channels by whatever token the client picks. Safe for solo / LAN use; a
+// foot-gun on a public host because two strangers who pick the same token
+// see each other's PTY streams. Refuse to boot in pairing mode unless the
+// operator opts in via RELAY_ALLOW_PAIRING=1.
+const ALLOW_PAIRING = process.env.RELAY_ALLOW_PAIRING === "1";
 const AUTH_TIMEOUT_MS = 10_000;
-const RING_BUFFER_SIZE = 500; // events per channel
+const RING_BUFFER_SIZE = 500; // structured agent_events per channel
+const TERM_BUFFER_MAX_BYTES = 64 * 1024; // raw PTY bytes retained per channel for replay
 const MAX_PAYLOAD_BYTES = 20 * 1024 * 1024; // 20MB for file uploads
 const BOT_DISCONNECT_GRACE_MS = 60_000; // 60s grace before cleaning up channels
 
 if (!AUTH_TOKEN) {
-  console.log("[relay] RELAY_AUTH_TOKEN not set — accepting any non-empty token (pairing mode).");
+  if (!ALLOW_PAIRING) {
+    console.error(
+      "[relay] FATAL: RELAY_AUTH_TOKEN is unset and RELAY_ALLOW_PAIRING is not '1'.\n" +
+      "         Refusing to start without an auth strategy. Either:\n" +
+      "           - set RELAY_AUTH_TOKEN to a shared secret (recommended; openssl rand -base64 32), or\n" +
+      "           - set RELAY_ALLOW_PAIRING=1 to explicitly accept any non-empty token (solo use only)."
+    );
+    process.exit(1);
+  }
+  console.warn("[relay] RELAY_ALLOW_PAIRING=1 — pairing mode active. Any non-empty token will authenticate; channels are scoped per token. Safe only on a single-user / private host.");
 }
 
 // --- State ---
@@ -52,6 +68,23 @@ const channelRegistry = new Map<string, {
 
 // Per-channel structured event buffer for SDK orchestrator
 const channelEvents = new Map<string, AgentEvent[]>();
+
+// Per-channel rolling PTY byte buffer. Kept so apps that subscribe after a
+// session has already started (e.g., desktop opening a session panel for a
+// phone-initiated channel) still see the Claude banner / earliest output.
+// Stored as the original term_data messages so replay is a straight resend.
+const channelTermBuffers = new Map<string, { chunks: TermData[]; totalBytes: number }>();
+
+// Approximate raw byte count of a base64 string without allocating a Buffer.
+// Each 4 base64 chars decode to 3 bytes, minus padding.
+function approxBase64DecodedBytes(b64: string): number {
+  const len = b64.length;
+  if (len === 0) return 0;
+  let padding = 0;
+  if (b64.charCodeAt(len - 1) === 61) padding++;
+  if (b64.charCodeAt(len - 2) === 61) padding++;
+  return Math.floor((len * 3) / 4) - padding;
+}
 
 // Grace timers: channel → timeout handle (bot disconnect → delayed cleanup)
 const channelGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -187,6 +220,7 @@ wss.on("connection", (ws) => {
           if (!reclaimed) {
             channelRegistry.delete(channel);
             channelEvents.delete(channel);
+            channelTermBuffers.delete(channel);
             console.log(`[relay] Grace period expired — removed channel: ${channel}`);
             broadcastChannelList(info.token);
           }
@@ -237,6 +271,16 @@ function handleAuth(client: Client, msg: AuthMessage): void {
         });
       }
     }
+
+    // Replay buffered PTY bytes so late subscribers see the recent terminal
+    // state (banner, prompt, last few interactions) instead of an empty xterm.
+    for (const [channel, buffer] of channelTermBuffers) {
+      const info = channelRegistry.get(channel);
+      if (!info || info.token !== client.token) continue;
+      for (const chunk of buffer.chunks) {
+        send(client.ws, chunk);
+      }
+    }
   }
 
   console.log(`[relay] ${msg.clientType} authenticated. Clients: ${clients.size}`);
@@ -272,6 +316,7 @@ function handleRemoveChannel(client: Client, channel: string): void {
   if (!info || info.token !== client.token) return;  // token mismatch — ignore
   channelRegistry.delete(channel);
   channelEvents.delete(channel);
+  channelTermBuffers.delete(channel);
   // Notify orchestrator so it can kill the subprocess
   broadcastToBots({ type: "channel_update", channel, agentStatus: "removed" }, client.token);
   broadcastChannelList(client.token);
@@ -336,8 +381,12 @@ function handlePermissionResponse(client: Client, msg: PermissionResponse): void
 }
 
 // --- PTY Protocol Handlers ---
-// Terminal traffic is live; we do NOT add to channelEvents (history buffer).
-// Reconnecting clients see only the bytes that arrive after they connect.
+// Terminal traffic is live and NOT added to the structured event history
+// (channelEvents). It IS retained in a small rolling byte buffer
+// (channelTermBuffers, ~64KB per channel) so a client that subscribes after a
+// session has already started still sees the most recent PTY output — e.g.
+// the desktop opening a session panel for a phone-initiated channel finds
+// the Claude banner already drawn instead of an empty terminal.
 
 function handleTermData(client: Client, msg: TermData): void {
   if (client.clientType !== "bot") {
@@ -347,6 +396,18 @@ function handleTermData(client: Client, msg: TermData): void {
   const info = channelRegistry.get(msg.channel);
   if (info && info.token !== client.token) return;
   broadcastToApps(msg, client.token);
+
+  let buffer = channelTermBuffers.get(msg.channel);
+  if (!buffer) {
+    buffer = { chunks: [], totalBytes: 0 };
+    channelTermBuffers.set(msg.channel, buffer);
+  }
+  buffer.chunks.push(msg);
+  buffer.totalBytes += approxBase64DecodedBytes(msg.data);
+  while (buffer.totalBytes > TERM_BUFFER_MAX_BYTES && buffer.chunks.length > 1) {
+    const dropped = buffer.chunks.shift()!;
+    buffer.totalBytes -= approxBase64DecodedBytes(dropped.data);
+  }
 }
 
 function handleTermInput(client: Client, msg: TermInput): void {

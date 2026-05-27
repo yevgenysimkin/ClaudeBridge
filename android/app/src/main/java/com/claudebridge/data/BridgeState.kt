@@ -178,11 +178,23 @@ object BridgeState {
     }
 
     fun registerStartRequest(requestId: String, onResolved: (String?, String?) -> Unit) {
+        android.util.Log.d("BridgeState", "registerStartRequest reqId=$requestId")
         _pendingStartRequests[requestId] = onResolved
     }
 
     fun resolveStartRequest(requestId: String, channelId: String?, error: String?) {
-        val cb = _pendingStartRequests.remove(requestId) ?: return
+        val cb = _pendingStartRequests.remove(requestId)
+        android.util.Log.d("BridgeState", "resolveStartRequest reqId=$requestId found=${cb != null} chId=$channelId err=$error pendingNow=${_pendingStartRequests.keys}")
+        if (cb == null) return
         cb(channelId, error)
+    }
+
+    /**
+     * Drop a pending start request without firing its callback. Used when the
+     * UI gives up (timeout, user navigated away) so a late desktop reply
+     * doesn't yank the user into a session they no longer expect.
+     */
+    fun clearStartRequest(requestId: String) {
+        _pendingStartRequests.remove(requestId)
     }
 }

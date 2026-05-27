@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.claudebridge.ClaudeBridgeApp
 import com.claudebridge.MainActivity
@@ -14,6 +15,8 @@ import com.claudebridge.R
 import com.claudebridge.data.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -30,9 +33,20 @@ class RelayService : Service(), RelayClient.Listener {
     private val binder = LocalBinder()
     private var relayClient: RelayClient? = null
 
+    // --- Auto-reconnect state -----------------------------------------------
+    // Mirrors the C++ client (CbRelayClient.cpp) and the JS clients
+    // (ClaudeBridgeManager_SessionScript.cpp etc.) so all three platforms
+    // recover from idle proxy kills and transient network drops the same way.
+    // See memory/cb-reconnect.md for the cross-layer architecture.
+    private var lastUrl: String? = null
+    private var lastToken: String? = null
+    private var reconnectJob: Job? = null
+    private var currentReconnectDelayMs = RECONNECT_BASE_MS
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand action=${intent?.action} flags=$flags startId=$startId")
         when (intent?.action) {
             ACTION_CONNECT -> {
                 val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
@@ -95,14 +109,21 @@ class RelayService : Service(), RelayClient.Listener {
     // --- RelayClient.Listener ---
 
     override fun onConnected() {
+        Log.d(TAG, "onConnected")
         BridgeState.setConnected(true)
         BridgeState.setError(null)
         updateConnectionNotification("Connected")
+        // Auth-and-channel-list succeeded — reset the backoff so the next drop
+        // recovers quickly. (Without this, a transient blip 20 minutes in
+        // would still wait 30s before retrying.)
+        currentReconnectDelayMs = RECONNECT_BASE_MS
     }
 
     override fun onDisconnected() {
+        Log.d(TAG, "onDisconnected (will scheduleReconnect)")
         BridgeState.setConnected(false)
-        updateConnectionNotification("Disconnected")
+        updateConnectionNotification("Reconnecting…")
+        scheduleReconnect()
     }
 
     override fun onChannelList(channels: List<Channel>) {
@@ -256,7 +277,15 @@ class RelayService : Service(), RelayClient.Listener {
     // --- Private ---
 
     private fun connect(url: String, token: String) {
-        disconnect()
+        Log.d(TAG, "connect() called — token=${token.take(8)}…")
+        lastUrl = url
+        lastToken = token
+        reconnectJob?.cancel()
+        reconnectJob = null
+        // Tear down any prior client without clearing lastUrl/lastToken —
+        // that's the disconnect() path. disconnectInternal() is the "drop
+        // the socket but keep our reconnect intent" version.
+        disconnectInternal()
         relayClient = RelayClient(url, token).also {
             it.listener = this
             it.connect()
@@ -264,9 +293,34 @@ class RelayService : Service(), RelayClient.Listener {
     }
 
     private fun disconnect() {
+        // User-initiated tear-down: clear reconnect intent so onDisconnected
+        // doesn't schedule a comeback after we explicitly asked to stop.
+        lastUrl = null
+        lastToken = null
+        reconnectJob?.cancel()
+        reconnectJob = null
+        disconnectInternal()
+        BridgeState.setConnected(false)
+    }
+
+    private fun disconnectInternal() {
         relayClient?.disconnect()
         relayClient = null
-        BridgeState.setConnected(false)
+    }
+
+    private fun scheduleReconnect() {
+        val url = lastUrl ?: return  // user disconnected — don't auto-revive
+        val token = lastToken ?: return
+        if (reconnectJob?.isActive == true) return
+        val delayMs = currentReconnectDelayMs
+        // Grow for next time, capped at the max. Multiplier matches the
+        // 1.5x used by the C++ client.
+        currentReconnectDelayMs = (currentReconnectDelayMs * 3L / 2L)
+            .coerceAtMost(RECONNECT_MAX_MS)
+        reconnectJob = CoroutineScope(Dispatchers.IO).launch {
+            delay(delayMs)
+            connect(url, token)
+        }
     }
 
     private fun buildConnectionNotification(status: String): Notification {
@@ -352,5 +406,8 @@ class RelayService : Service(), RelayClient.Listener {
         const val EXTRA_BEHAVIOR = "behavior"
         private const val NOTIFICATION_ID_CONNECTION = 1
         private const val NOTIFICATION_ID_ATTENTION_BASE = 1000
+        private const val RECONNECT_BASE_MS = 3_000L
+        private const val RECONNECT_MAX_MS = 30_000L
+        private const val TAG = "RelayService"
     }
 }

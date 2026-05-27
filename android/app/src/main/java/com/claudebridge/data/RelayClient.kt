@@ -1,5 +1,6 @@
 package com.claudebridge.data
 
+import android.util.Log
 import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -30,8 +31,12 @@ class RelayClient(
     private var webSocket: WebSocket? = null
     private var connected = false
     private var authRetried = false
+    // readTimeout=0 → no idle close: WebSocket frames can be sparse, and we
+    // already keep the connection alive via OkHttp's pingInterval. The default
+    // 10s readTimeout was almost certainly responsible for our 2-second flap.
     private val client = OkHttpClient.Builder()
-        .pingInterval(30, TimeUnit.SECONDS)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     fun connect() {
@@ -40,6 +45,7 @@ class RelayClient(
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.d(TAG, "WS onOpen")
                 val auth = JSONObject().apply {
                     put("type", "auth")
                     put("token", authToken)
@@ -49,16 +55,24 @@ class RelayClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleMessage(JSONObject(text))
+                try {
+                    handleMessage(JSONObject(text))
+                } catch (e: Exception) {
+                    // Swallow parse errors so a malformed broadcast doesn't
+                    // bubble out of onMessage and tear the WS down.
+                    Log.w(TAG, "WS message parse failed: ${e.message} (text head: ${text.take(120)})")
+                }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "WS onClosing code=$code reason=$reason")
                 webSocket.close(1000, null)
                 connected = false
                 listener?.onDisconnected()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.w(TAG, "WS onFailure ${t::class.java.simpleName}: ${t.message} (httpCode=${response?.code})")
                 connected = false
                 listener?.onError("Connection failed: ${t.message}")
                 listener?.onDisconnected()
@@ -206,6 +220,10 @@ class RelayClient(
 
     val isConnected: Boolean get() = connected
 
+    companion object {
+        private const val TAG = "RelayClient"
+    }
+
     // --- Private ---
 
     private fun handleMessage(json: JSONObject) {
@@ -280,11 +298,11 @@ class RelayClient(
             }
 
             "remote_session_started" -> {
-                listener?.onRemoteSessionStarted(
-                    requestId = json.getString("requestId"),
-                    channelId = if (json.has("channelId")) json.getString("channelId") else null,
-                    error     = if (json.has("error")) json.getString("error") else null
-                )
+                val reqId = json.optString("requestId", "")
+                val chId  = if (json.has("channelId")) json.getString("channelId") else null
+                val err   = if (json.has("error")) json.getString("error") else null
+                Log.d(TAG, "remote_session_started reqId=$reqId chId=$chId err=$err")
+                listener?.onRemoteSessionStarted(reqId, chId, err)
             }
 
             "error" -> listener?.onError(json.getString("message"))

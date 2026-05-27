@@ -7,6 +7,8 @@ node_modules/
 # Build output
 bot/dist/
 relay/dist/
+proxy/dist/
+proxy/bin/
 
 # Android
 android/.gradle/
@@ -14,6 +16,8 @@ android/build/
 android/app/build/
 android/local.properties
 *.apk
+*.jks
+keystore.properties
 
 # IDE
 .idea/
@@ -27,6 +31,11 @@ Thumbs.db
 
 # Bridge prompt files
 .claude-bridge-prompt
+
+# Claude Code per-clone state — must NEVER be committed; permission
+# allowlist patterns can quote literal env vars (including auth tokens).
+.claude/
+CLAUDE.md
 
 # Logs
 *.log

@@ -1,5 +1,19 @@
 # ClaudeBridge
 
+> **⚠ Doc currency warning (May 2026):** This README still describes the v1 stream-JSON / Bridge-Bot architecture. The current code is **v2 — real PTY + xterm.js end-to-end** (see [the v2 design notes](#v2-pty-architecture-current) below). The Quick Start commands below are out of date and will be rewritten. The relay is real and works; the phone-side configuration is now provisioned automatically via OTP login to Chromattica, not by pasting tokens.
+
+## Security note before you deploy
+The relay supports two auth modes:
+
+- **Locked** (recommended) — set `RELAY_AUTH_TOKEN` to a shared secret. Only clients with the exact token authenticate.
+- **Pairing** — leave `RELAY_AUTH_TOKEN` unset and explicitly set `RELAY_ALLOW_PAIRING=1`. The relay then accepts any non-empty token and scopes channels by whichever token a client picks. Two strangers who happen to pick the same string see each other's PTY streams. **Only use pairing mode on a single-user / private host.** Without either env var, the relay refuses to start.
+
+## Supported topology
+
+One bot (Chromattica desktop) per auth token. The relay forwards control-protocol messages (`list_directory`, `remote_start_session`) to *all* connected bots that share a token, and trusts whichever bot replies first. If you run two desktops on the same token, a buggy or malicious one can forge filesystem listings to the phone. Stick to one bot per token until this is hardened.
+
+## v2 PTY architecture (current)
+
 Monitor and interact with multiple Claude Code sessions from your phone. Approve permissions, send messages, and track agent activity — all via a native Android app.
 
 ## How It Works
