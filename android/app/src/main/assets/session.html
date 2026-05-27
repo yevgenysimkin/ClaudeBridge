@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ClaudeBridge Session</title>
+<!--
+  Mirror of the desktop session UI (Chromattica/native/src/services/
+  ClaudeBridgeManager_SessionHtml.cpp + SessionScript.cpp + SessionStyle.cpp).
+  v2 (PTY revival, 2026-06): an xterm.js terminal rendering the PTY stream
+  piped through the relay. Manual-sync with desktop for now; unifying the
+  source of truth is a post-cutover task.
+-->
+<link rel="stylesheet" href="vendor/xterm/xterm.css">
+<script src="vendor/xterm/xterm.js"></script>
+<script src="vendor/xterm/xterm-addon-fit.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a1a; color: #cccccc;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; flex-direction: column;
+}
+.header {
+    display: flex; align-items: center; padding: 10px 14px;
+    border-bottom: 1px solid #333; gap: 10px; min-height: 44px;
+    flex-shrink: 0;
+}
+.back-btn {
+    background: none; border: none; color: #4a9eff; cursor: pointer;
+    font-size: 20px; padding: 4px 8px; border-radius: 4px;
+}
+.session-title { font-size: 15px; color: #fff; font-weight: 600; flex: 1; }
+.session-status-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    text-transform: uppercase; font-weight: 600;
+}
+.session-status-badge.running  { background: #2d4a2d; color: #6ce06c; }
+.session-status-badge.stopped  { background: #4a2d2d; color: #ff8a8a; }
+.session-status-badge.idle     { background: #3a3a3a; color: #aaa; }
+.stop-btn {
+    display: none; background: none; border: 1px solid #ff8a8a;
+    color: #ff8a8a; padding: 4px 10px; border-radius: 4px; font-size: 12px;
+}
+.stop-btn.visible { display: inline-block; }
+.connection-banner {
+    display: none; padding: 8px 16px; text-align: center; font-size: 13px;
+    background: #4a2d2d; color: #ff8a8a; flex-shrink: 0;
+}
+.connection-banner.visible { display: block; }
+#terminal {
+    flex: 1 1 auto; min-height: 0;
+    padding: 6px 8px; background: #1a1a1a;
+}
+.xterm, .xterm-viewport, .xterm-screen { height: 100% !important; }
+.xterm-viewport { background: transparent !important; }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <button class="back-btn" onclick="goBack()">&larr;</button>
+    <span class="session-title" id="sessionTitle">Session</span>
+    <span class="session-status-badge" id="statusBadge" style="display:none;"></span>
+    <button class="stop-btn" id="stopBtn" onclick="sendInterrupt()">Stop</button>
+</div>
+
+<div class="connection-banner" id="connBanner">Reconnecting to relay&hellip;</div>
+
+<div id="terminal"></div>
+
+<script>
+let ws = null;
+let term = null;
+let fitAddon = null;
+let channelId = null;
+let wasConnected = false;
+let reconnectTimer = null;
+let reconnectDelay = 3000;
+let pingInterval = null;
+
+const RECONNECT_BASE_MS = 3000;
+const RECONNECT_MAX_MS  = 30000;
+const PING_INTERVAL_MS  = 25000;
+
+function goBack() {
+    try { if (window.__cbAndroid) window.__cbAndroid.goBack(); } catch (_) {}
+}
+
+function setStatusBadge(status) {
+    const badge = document.getElementById('statusBadge');
+    if (!badge) return;
+    badge.style.display = status ? 'inline' : 'none';
+    badge.textContent = status || '';
+    badge.className = 'session-status-badge ' + (status || '').toLowerCase();
+}
+
+function setConnectionBanner(visible) {
+    const banner = document.getElementById('connBanner');
+    if (banner) banner.classList.toggle('visible', visible);
+}
+
+function setStopVisible(visible) {
+    const btn = document.getElementById('stopBtn');
+    if (btn) btn.classList.toggle('visible', visible);
+}
+
+function setTitle(name) {
+    const el = document.getElementById('sessionTitle');
+    if (el && name) el.textContent = name;
+}
+
+function initTerminal() {
+    term = new Terminal({
+        cursorBlink: true,
+        convertEol: false,
+        fontSize: 13,
+        fontFamily: 'Menlo, Monaco, "DejaVu Sans Mono", monospace',
+        scrollback: 5000,
+        theme: { background: 'rgba(0,0,0,0)' },
+        allowProposedApi: true,
+    });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();
+
+    term.onData((data) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN || !channelId) return;
+        ws.send(JSON.stringify({
+            type: 'term_input',
+            channel: channelId,
+            data: btoa(data),
+            timestamp: Date.now(),
+        }));
+    });
+
+    const ro = new ResizeObserver(() => {
+        try {
+            fitAddon.fit();
+            if (ws && ws.readyState === WebSocket.OPEN && channelId && term) {
+                ws.send(JSON.stringify({
+                    type: 'term_resize',
+                    channel: channelId,
+                    cols: term.cols,
+                    rows: term.rows,
+                    timestamp: Date.now(),
+                }));
+            }
+        } catch (_) {}
+    });
+    ro.observe(document.getElementById('terminal'));
+}
+
+function writeTermBytes(b64) {
+    if (!term) return;
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    term.write(bytes);
+}
+
+function connect() {
+    if (!window.__cbConfig || !window.__cbConfig.relayUrl) {
+        setTimeout(connect, 300); return;
+    }
+    channelId = window.__cbConfig.channelId || null;
+    if (!channelId) { setTimeout(connect, 300); return; }
+    if (window.__cbConfig.channelName) setTitle(window.__cbConfig.channelName);
+
+    const url = (window.__cbConfig.relayUrl || '')
+        .replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+
+    try { ws = new WebSocket(url); } catch (_) { scheduleReconnect(); return; }
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({
+            type: 'auth',
+            token: window.__cbConfig.relayAuthToken,
+            clientType: 'app',
+        }));
+    };
+
+    ws.onmessage = (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch (_) { return; }
+        handleRelayMessage(msg);
+    };
+
+    ws.onclose = () => {
+        wasConnected = false;
+        setConnectionBanner(true);
+        clearInterval(pingInterval); pingInterval = null;
+        scheduleReconnect();
+    };
+}
+
+function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+        connect();
+    }, reconnectDelay);
+}
+
+function handleRelayMessage(msg) {
+    switch (msg.type) {
+    case 'auth_result':
+        if (msg.success) {
+            wasConnected = true;
+            reconnectDelay = RECONNECT_BASE_MS;
+            setConnectionBanner(false);
+            startPingLoop();
+        } else {
+            setConnectionBanner(true);
+        }
+        return;
+
+    case 'channel_list':
+        if (Array.isArray(msg.channels)) {
+            const me = msg.channels.find((c) => c.id === channelId);
+            if (me) {
+                setTitle(me.name);
+                setStatusBadge(me.agentStatus);
+                setStopVisible(me.agentStatus === 'running');
+            }
+        }
+        return;
+
+    case 'channel_update':
+        if (msg.channel === channelId) {
+            if (msg.name) setTitle(msg.name);
+            if (msg.agentStatus) {
+                setStatusBadge(msg.agentStatus);
+                setStopVisible(msg.agentStatus === 'running');
+            }
+        }
+        return;
+
+    case 'term_data':
+        if (msg.channel === channelId && msg.data) writeTermBytes(msg.data);
+        return;
+
+    case 'history_sync':
+        return; // PTY mode: live state, no replay.
+
+    case 'ping':
+        ws.send(JSON.stringify({ type: 'pong', pingId: msg.pingId }));
+        return;
+    }
+}
+
+function startPingLoop() {
+    clearInterval(pingInterval);
+    pingInterval = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping', pingId: String(Date.now()) }));
+        }
+    }, PING_INTERVAL_MS);
+}
+
+function sendInterrupt() {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !channelId) return;
+    ws.send(JSON.stringify({
+        type: 'interrupt_request',
+        channel: channelId,
+        timestamp: Date.now(),
+    }));
+}
+
+window.addEventListener('load', () => {
+    initTerminal();
+    connect();
+});
+</script>
+</body>
+</html>

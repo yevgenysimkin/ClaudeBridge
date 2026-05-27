@@ -10,6 +10,9 @@ import type {
   AgentEvent,
   UserPrompt,
   PermissionResponse,
+  TermData,
+  TermInput,
+  TermResize,
 } from "./protocol.js";
 
 // --- Config ---
@@ -118,6 +121,15 @@ wss.on("connection", (ws) => {
         break;
       case "permission_response":
         handlePermissionResponse(client, msg);
+        break;
+      case "term_data":
+        handleTermData(client, msg);
+        break;
+      case "term_input":
+        handleTermInput(client, msg);
+        break;
+      case "term_resize":
+        handleTermResize(client, msg);
         break;
       case "ping":
         handlePing(client, msg.pingId);
@@ -304,6 +316,40 @@ function handleUserPrompt(client: Client, msg: UserPrompt): void {
 
 function handlePermissionResponse(client: Client, msg: PermissionResponse): void {
   // Forward permission response to bot (orchestrator) — scoped by token
+  broadcastToBots(msg, client.token);
+}
+
+// --- PTY Protocol Handlers ---
+// Terminal traffic is live; we do NOT add to channelEvents (history buffer).
+// Reconnecting clients see only the bytes that arrive after they connect.
+
+function handleTermData(client: Client, msg: TermData): void {
+  if (client.clientType !== "bot") {
+    send(client.ws, { type: "error", message: "Only bot clients can send term_data." });
+    return;
+  }
+  const info = channelRegistry.get(msg.channel);
+  if (info && info.token !== client.token) return;
+  broadcastToApps(msg, client.token);
+}
+
+function handleTermInput(client: Client, msg: TermInput): void {
+  if (client.clientType !== "app") {
+    send(client.ws, { type: "error", message: "Only app clients can send term_input." });
+    return;
+  }
+  const info = channelRegistry.get(msg.channel);
+  if (!info || info.token !== client.token) return;
+  broadcastToBots(msg, client.token);
+}
+
+function handleTermResize(client: Client, msg: TermResize): void {
+  if (client.clientType !== "app") {
+    send(client.ws, { type: "error", message: "Only app clients can send term_resize." });
+    return;
+  }
+  const info = channelRegistry.get(msg.channel);
+  if (!info || info.token !== client.token) return;
   broadcastToBots(msg, client.token);
 }
 

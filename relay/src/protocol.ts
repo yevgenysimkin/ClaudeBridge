@@ -119,6 +119,45 @@ export interface PermissionResponse {
   timestamp: number;
 }
 
+// --- PTY Protocol: Terminal byte streaming (live, not buffered) ---
+
+/**
+ * Bot → relay → apps: raw PTY output bytes for live xterm.js rendering.
+ * Base64-encoded so binary-safe over JSON.
+ * NOT added to the history buffer — terminal state is live; reconnecting clients
+ * see only what arrives after they connect.
+ */
+export interface TermData {
+  type: "term_data";
+  channel: string;
+  /** Base64-encoded raw PTY bytes (may include ANSI escape sequences). */
+  data: string;
+  timestamp: number;
+}
+
+/**
+ * App → relay → bot: keystrokes typed in xterm.js, written into the PTY master fd.
+ * Base64-encoded so control sequences (arrow keys, Ctrl-C, etc.) survive JSON.
+ */
+export interface TermInput {
+  type: "term_input";
+  channel: string;
+  /** Base64-encoded raw keystroke bytes. */
+  data: string;
+  timestamp: number;
+}
+
+/**
+ * App → relay → bot: xterm.js viewport resized; PTY needs TIOCSWINSZ ioctl.
+ */
+export interface TermResize {
+  type: "term_resize";
+  channel: string;
+  cols: number;
+  rows: number;
+  timestamp: number;
+}
+
 export type ClientMessage =
   | AuthMessage
   | RegisterChannel
@@ -128,6 +167,9 @@ export type ClientMessage =
   | AgentEvent
   | UserPrompt
   | PermissionResponse
+  | TermData
+  | TermInput
+  | TermResize
   | Ping
   | Pong;
 
@@ -184,6 +226,9 @@ export type RelayMessage =
   | AgentEvent
   | UserPrompt
   | PermissionResponse
+  | TermData
+  | TermInput
+  | TermResize
   | HistorySync
   | Ping
   | Pong
