@@ -396,8 +396,12 @@ function handleTermData(client: Client, msg: TermData): void {
     send(client.ws, { type: "error", message: "Only bot clients can send term_data." });
     return;
   }
+  // Require the channel to actually be registered and owned by this bot's
+  // token. Without the `!info` guard a misbehaving bot could push term_data
+  // for arbitrary channel IDs it never registered and grow the buffer map
+  // unbounded.
   const info = channelRegistry.get(msg.channel);
-  if (info && info.token !== client.token) return;
+  if (!info || info.token !== client.token) return;
   broadcastToApps(msg, client.token);
 
   let buffer = channelTermBuffers.get(msg.channel);

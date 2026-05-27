@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.claudebridge.BuildConfig
 import org.json.JSONObject
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -31,10 +32,10 @@ fun WebViewSessionScreen(
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.systemBars),
         factory = { context ->
-            // Expose every WebView in the app to chrome://inspect when the
-            // debug build is installed. Cheap to leave on for release too — it
-            // does nothing unless USB debugging is active.
-            WebView.setWebContentsDebuggingEnabled(true)
+            // Only expose to chrome://inspect on debug builds. Production
+            // APKs ship with this off so a rooted/dev phone can't attach
+            // a remote debugger to live PTY traffic.
+            WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
             WebView(context).apply {
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
