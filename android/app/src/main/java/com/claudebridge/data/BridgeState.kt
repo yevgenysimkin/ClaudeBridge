@@ -29,6 +29,32 @@ object BridgeState {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
 
+    // --- Remote-control state ---
+
+    /**
+     * Desktop's Android-allowed root, learned from the most recent
+     * directory_listing reply. null = no listing received yet; "" = desktop
+     * has not configured a root (the UI should show "configure in Chromattica
+     * settings"); any non-empty string = browsing/start enabled at that path.
+     */
+    private val _allowedRoot = MutableStateFlow<String?>(null)
+    val allowedRoot: StateFlow<String?> = _allowedRoot
+
+    /** Current directory listing for the NewSessionSheet folder browser. */
+    private val _currentDirListing = MutableStateFlow<DirectoryListing?>(null)
+    val currentDirListing: StateFlow<DirectoryListing?> = _currentDirListing
+
+    /**
+     * Pending remote_start_session callbacks keyed by requestId. The sheet
+     * registers a callback when it sends a Start request; the relay listener
+     * resolves it on remote_session_started. Synchronized because Kotlin's
+     * map mutation isn't thread-safe and the relay thread fires the resolve.
+     */
+    private val _pendingStartRequests =
+        java.util.concurrent.ConcurrentHashMap<String, (String?, String?) -> Unit>()
+    val pendingStartRequests: Map<String, (String?, String?) -> Unit>
+        get() = _pendingStartRequests
+
     private const val MAX_MESSAGES_PER_CHANNEL = 500
 
     fun setConnected(value: Boolean) {
@@ -139,5 +165,24 @@ object BridgeState {
         _pendingPermission.value = emptyMap()
         _streamingText.value = emptyMap()
         _error.value = null
+        _allowedRoot.value = null
+        _currentDirListing.value = null
+        _pendingStartRequests.clear()
+    }
+
+    // --- Remote-control mutators ---
+
+    fun applyDirectoryListing(listing: DirectoryListing) {
+        _allowedRoot.value = listing.allowedRoot
+        _currentDirListing.value = listing
+    }
+
+    fun registerStartRequest(requestId: String, onResolved: (String?, String?) -> Unit) {
+        _pendingStartRequests[requestId] = onResolved
+    }
+
+    fun resolveStartRequest(requestId: String, channelId: String?, error: String?) {
+        val cb = _pendingStartRequests.remove(requestId) ?: return
+        cb(channelId, error)
     }
 }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -26,11 +27,17 @@ import com.claudebridge.ui.theme.*
 fun ChannelListScreen(
     channels: List<Channel>,
     connected: Boolean,
+    allowedRoot: String?,
     onRefresh: () -> Unit,
     onChannelClick: (String) -> Unit,
     onRemoveChannel: (String) -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onNewSessionClick: () -> Unit
 ) {
+    // Remote-start is available when the desktop has reported a non-empty
+    // allowed root. null = haven't heard back yet (probe was sent but no reply
+    // — disable until we know); "" = desktop explicitly says unconfigured.
+    val canStart = !allowedRoot.isNullOrEmpty() && connected
     Scaffold(
         topBar = {
             TopAppBar(
@@ -42,6 +49,13 @@ fun ChannelListScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onNewSessionClick, enabled = canStart) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = if (canStart) "Start new session"
+                                                 else "Configure Android-allowed root in Chromattica settings"
+                        )
+                    }
                     IconButton(onClick = onRefresh) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }

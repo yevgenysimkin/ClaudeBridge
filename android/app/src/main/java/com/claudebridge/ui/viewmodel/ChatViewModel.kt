@@ -33,6 +33,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val pendingPermission = BridgeState.pendingPermission
     val streamingText = BridgeState.streamingText
     val error = BridgeState.error
+    val allowedRoot = BridgeState.allowedRoot
+    val currentDirListing = BridgeState.currentDirListing
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -114,6 +116,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun refresh() {
         stopConnection()
         startConnection()
+    }
+
+    // --- Remote-control API ---
+
+    /** Ask the desktop control bot for a directory listing under the allowed root. */
+    fun listDirectory(path: String?) {
+        service?.listDirectory(java.util.UUID.randomUUID().toString(), path)
+    }
+
+    /**
+     * Provoke a new CB session on the connected desktop. Resolves the
+     * callback with (channelId, error) — one of them will be non-null.
+     */
+    fun remoteStartSession(
+        projectDir: String,
+        model: String?,
+        skipPermissions: Boolean,
+        onResolved: (channelId: String?, error: String?) -> Unit
+    ) {
+        val svc = service ?: run {
+            onResolved(null, "Not connected to relay service")
+            return
+        }
+        val requestId = java.util.UUID.randomUUID().toString()
+        BridgeState.registerStartRequest(requestId, onResolved)
+        svc.remoteStartSession(requestId, projectDir, model, skipPermissions)
     }
 
     private fun unbind() {

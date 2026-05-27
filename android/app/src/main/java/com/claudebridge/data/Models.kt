@@ -63,6 +63,28 @@ data class PermissionQuestionOption(
     val description: String
 )
 
+// --- Remote control protocol (Android → desktop) ---
+
+/** One entry inside a directory listing returned by the desktop control bot. */
+data class DirectoryEntry(
+    val name: String,
+    val isDir: Boolean
+)
+
+/**
+ * Response to a list_directory request. allowedRoot empty = desktop hasn't
+ * configured a root yet (Android shows a "configure in Chromattica settings"
+ * affordance). error non-null = path was rejected or unreadable.
+ */
+data class DirectoryListing(
+    val requestId: String,
+    val path: String,
+    val allowedRoot: String,
+    val entries: List<DirectoryEntry>,
+    val parent: String?,
+    val error: String?
+)
+
 /** A file attachment to send with a user prompt. */
 data class FileAttachment(
     val filename: String,

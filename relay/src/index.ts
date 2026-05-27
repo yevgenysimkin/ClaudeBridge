@@ -13,6 +13,10 @@ import type {
   TermData,
   TermInput,
   TermResize,
+  ListDirectory,
+  DirectoryListing,
+  RemoteStartSession,
+  RemoteSessionStarted,
 } from "./protocol.js";
 
 // --- Config ---
@@ -130,6 +134,18 @@ wss.on("connection", (ws) => {
         break;
       case "term_resize":
         handleTermResize(client, msg);
+        break;
+      case "list_directory":
+        handleListDirectory(client, msg);
+        break;
+      case "directory_listing":
+        handleDirectoryListing(client, msg);
+        break;
+      case "remote_start_session":
+        handleRemoteStartSession(client, msg);
+        break;
+      case "remote_session_started":
+        handleRemoteSessionStarted(client, msg);
         break;
       case "ping":
         handlePing(client, msg.pingId);
@@ -351,6 +367,44 @@ function handleTermResize(client: Client, msg: TermResize): void {
   const info = channelRegistry.get(msg.channel);
   if (!info || info.token !== client.token) return;
   broadcastToBots(msg, client.token);
+}
+
+// --- Control Protocol Handlers ---
+// These messages are channel-less: they go to/from the desktop's "control bot"
+// which owns directory browsing and remote session creation. Token-scoped via
+// client.token; the desktop validates path / project-dir against its
+// configured Android-allowed root before acting on anything.
+
+function handleListDirectory(client: Client, msg: ListDirectory): void {
+  if (client.clientType !== "app") {
+    send(client.ws, { type: "error", message: "Only app clients can send list_directory." });
+    return;
+  }
+  broadcastToBots(msg, client.token);
+}
+
+function handleDirectoryListing(client: Client, msg: DirectoryListing): void {
+  if (client.clientType !== "bot") {
+    send(client.ws, { type: "error", message: "Only bot clients can send directory_listing." });
+    return;
+  }
+  broadcastToApps(msg, client.token);
+}
+
+function handleRemoteStartSession(client: Client, msg: RemoteStartSession): void {
+  if (client.clientType !== "app") {
+    send(client.ws, { type: "error", message: "Only app clients can send remote_start_session." });
+    return;
+  }
+  broadcastToBots(msg, client.token);
+}
+
+function handleRemoteSessionStarted(client: Client, msg: RemoteSessionStarted): void {
+  if (client.clientType !== "bot") {
+    send(client.ws, { type: "error", message: "Only bot clients can send remote_session_started." });
+    return;
+  }
+  broadcastToApps(msg, client.token);
 }
 
 function handlePing(client: Client, pingId: string): void {

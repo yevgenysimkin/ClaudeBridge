@@ -18,6 +18,7 @@ import com.claudebridge.data.ChromatticaApi
 import com.claudebridge.data.ConfigRefreshResult
 import com.claudebridge.data.Preferences
 import com.claudebridge.ui.screen.ChannelListScreen
+import com.claudebridge.ui.screen.NewSessionSheet
 import com.claudebridge.ui.screen.WebViewSessionScreen
 import com.claudebridge.ui.screen.SettingsScreen
 import com.claudebridge.ui.theme.ClaudeBridgeTheme
@@ -63,6 +64,17 @@ fun ClaudeBridgeNavHost() {
     val pendingPermission by vm.pendingPermission.collectAsState()
     val streamingText by vm.streamingText.collectAsState()
     val currentChannel by vm.currentChannel.collectAsState()
+    val allowedRoot by vm.allowedRoot.collectAsState()
+    val currentDirListing by vm.currentDirListing.collectAsState()
+
+    var showNewSessionSheet by remember { mutableStateOf(false) }
+
+    // Probe the desktop for allowedRoot whenever we (re)connect so the "+" icon
+    // accurately reflects whether remote-start is configured. Cheap: it's just
+    // a list_directory request that returns a small JSON blob.
+    LaunchedEffect(connected) {
+        if (connected) vm.listDirectory(null)
+    }
 
     // Refresh config from server on launch, then auto-connect
     LaunchedEffect(Unit) {
@@ -88,6 +100,7 @@ fun ClaudeBridgeNavHost() {
             ChannelListScreen(
                 channels = channels,
                 connected = connected,
+                allowedRoot = allowedRoot,
                 onRefresh = { vm.refresh() },
                 onChannelClick = { channelId ->
                     vm.selectChannel(channelId)
@@ -96,8 +109,27 @@ fun ClaudeBridgeNavHost() {
                 onRemoveChannel = { channelId -> vm.removeChannel(channelId) },
                 onSettingsClick = {
                     navController.navigate("settings")
-                }
+                },
+                onNewSessionClick = { showNewSessionSheet = true }
             )
+
+            if (showNewSessionSheet && !allowedRoot.isNullOrEmpty()) {
+                NewSessionSheet(
+                    prefs = prefs,
+                    allowedRoot = allowedRoot ?: "",
+                    currentDirListing = currentDirListing,
+                    onBrowseTo = { path -> vm.listDirectory(path) },
+                    onStart = { projectDir, model, skipPerms, onResolved ->
+                        vm.remoteStartSession(projectDir, model, skipPerms, onResolved)
+                    },
+                    onSessionStarted = { channelId ->
+                        showNewSessionSheet = false
+                        vm.selectChannel(channelId)
+                        navController.navigate("session/$channelId")
+                    },
+                    onDismiss = { showNewSessionSheet = false }
+                )
+            }
         }
 
         composable("session/{channelId}") { backStackEntry ->

@@ -228,6 +228,31 @@ class RelayService : Service(), RelayClient.Listener {
         BridgeState.setError(error)
     }
 
+    override fun onDirectoryListing(listing: DirectoryListing) {
+        BridgeState.applyDirectoryListing(listing)
+    }
+
+    override fun onRemoteSessionStarted(requestId: String, channelId: String?, error: String?) {
+        BridgeState.resolveStartRequest(requestId, channelId, error)
+    }
+
+    // --- Public API for remote-control feature ---
+
+    /** Ask the desktop control bot for a directory listing. */
+    fun listDirectory(requestId: String, path: String?) {
+        relayClient?.sendListDirectory(requestId, path)
+    }
+
+    /** Provoke a new CB session on the connected desktop. */
+    fun remoteStartSession(
+        requestId: String,
+        projectDir: String,
+        model: String?,
+        skipPermissions: Boolean
+    ) {
+        relayClient?.sendRemoteStartSession(requestId, projectDir, model, skipPermissions)
+    }
+
     // --- Private ---
 
     private fun connect(url: String, token: String) {

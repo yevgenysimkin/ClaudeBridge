@@ -119,6 +119,75 @@ export interface PermissionResponse {
   timestamp: number;
 }
 
+// --- Control Protocol: directory browsing + remote session provocation ---
+
+/**
+ * App → bot: ask the desktop for a directory listing under its configured
+ * Android-allowed project root. Used by the phone's "Start new session"
+ * folder browser. The desktop validates the requested path against its
+ * allowedRoot setting; out-of-root paths are rejected with an error.
+ *
+ * If `path` is absent or empty, the desktop lists the allowedRoot itself.
+ */
+export interface ListDirectory {
+  type: "list_directory";
+  /** Correlates response. App generates a fresh id per request. */
+  requestId: string;
+  path?: string;
+  timestamp: number;
+}
+
+/** Single entry in a directory listing. */
+export interface DirectoryEntry {
+  name: string;
+  isDir: boolean;
+}
+
+/**
+ * Bot → app: directory listing response. If allowedRoot is empty, the desktop
+ * has not configured a root and remote provocation is disabled — phone shows
+ * a "configure in Chromattica settings" affordance.
+ */
+export interface DirectoryListing {
+  type: "directory_listing";
+  requestId: string;
+  /** Resolved absolute path that was listed. */
+  path: string;
+  /** Empty string if the desktop has no allowed-root set. */
+  allowedRoot: string;
+  entries: DirectoryEntry[];
+  /** Absent when `path` is the allowedRoot itself. */
+  parent?: string;
+  error?: string;
+  timestamp: number;
+}
+
+/**
+ * App → bot: provoke a new CB session. The desktop validates projectDir is
+ * under allowedRoot before spawning. Silent spawn — the desktop window does
+ * NOT raise; the user explicitly chose to start remotely.
+ */
+export interface RemoteStartSession {
+  type: "remote_start_session";
+  requestId: string;
+  projectDir: string;
+  model?: string;
+  skipPermissions?: boolean;
+  timestamp: number;
+}
+
+/**
+ * Bot → app: confirmation of remote-start. On success the phone navigates
+ * straight into the new session's xterm view via channelId.
+ */
+export interface RemoteSessionStarted {
+  type: "remote_session_started";
+  requestId: string;
+  channelId?: string;
+  error?: string;
+  timestamp: number;
+}
+
 // --- PTY Protocol: Terminal byte streaming (live, not buffered) ---
 
 /**
@@ -170,6 +239,10 @@ export type ClientMessage =
   | TermData
   | TermInput
   | TermResize
+  | ListDirectory
+  | DirectoryListing
+  | RemoteStartSession
+  | RemoteSessionStarted
   | Ping
   | Pong;
 
@@ -229,6 +302,10 @@ export type RelayMessage =
   | TermData
   | TermInput
   | TermResize
+  | ListDirectory
+  | DirectoryListing
+  | RemoteStartSession
+  | RemoteSessionStarted
   | HistorySync
   | Ping
   | Pong

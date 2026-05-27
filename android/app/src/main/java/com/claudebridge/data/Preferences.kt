@@ -30,6 +30,19 @@ class Preferences(context: Context) {
         get() = prefs.getString(KEY_EMAIL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_EMAIL, value).apply()
 
+    /**
+     * Last model selected in the "Start new session" sheet — pre-populates the
+     * dropdown the next time the user opens it.
+     */
+    var lastModel: String
+        get() = prefs.getString(KEY_LAST_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+        set(value) = prefs.edit().putString(KEY_LAST_MODEL, value).apply()
+
+    /** Last value of the --dangerously-skip-permissions checkbox in the sheet. */
+    var skipPermsPreference: Boolean
+        get() = prefs.getBoolean(KEY_SKIP_PERMS, false)
+        set(value) = prefs.edit().putBoolean(KEY_SKIP_PERMS, value).apply()
+
     /** True if relay credentials are configured (logged in AND relay bound). */
     val isConfigured: Boolean
         get() = relayUrl.isNotBlank() && authToken.isNotBlank()
@@ -49,5 +62,8 @@ class Preferences(context: Context) {
         private const val KEY_AUTH_TOKEN = "auth_token"
         private const val KEY_SESSION_TOKEN = "session_token"
         private const val KEY_EMAIL = "email"
+        private const val KEY_LAST_MODEL = "last_model"
+        private const val KEY_SKIP_PERMS = "skip_perms"
+        const val DEFAULT_MODEL = "claude-opus-4-7"
     }
 }

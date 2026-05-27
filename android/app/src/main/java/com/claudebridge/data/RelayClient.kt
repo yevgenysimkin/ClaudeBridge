@@ -20,6 +20,10 @@ class RelayClient(
         fun onError(error: String)
         /** Called when relay auth fails. Service can refresh token and call retryAuth(). */
         fun onAuthFailed(error: String) {}
+        /** Remote-control: directory listing reply from the desktop control bot. */
+        fun onDirectoryListing(listing: DirectoryListing) {}
+        /** Remote-control: response to a remote_start_session request. */
+        fun onRemoteSessionStarted(requestId: String, channelId: String?, error: String?) {}
     }
 
     var listener: Listener? = null
@@ -151,6 +155,35 @@ class RelayClient(
         webSocket?.send(msg.toString())
     }
 
+    /** Ask the desktop control bot for a directory listing under the allowed root. */
+    fun sendListDirectory(requestId: String, path: String?) {
+        val msg = JSONObject().apply {
+            put("type", "list_directory")
+            put("requestId", requestId)
+            if (path != null) put("path", path)
+            put("timestamp", System.currentTimeMillis())
+        }
+        webSocket?.send(msg.toString())
+    }
+
+    /** Provoke a new CB session on the connected desktop. */
+    fun sendRemoteStartSession(
+        requestId: String,
+        projectDir: String,
+        model: String?,
+        skipPermissions: Boolean
+    ) {
+        val msg = JSONObject().apply {
+            put("type", "remote_start_session")
+            put("requestId", requestId)
+            put("projectDir", projectDir)
+            if (model != null) put("model", model)
+            put("skipPermissions", skipPermissions)
+            put("timestamp", System.currentTimeMillis())
+        }
+        webSocket?.send(msg.toString())
+    }
+
     fun sendPong(pingId: String) {
         val msg = JSONObject().apply {
             put("type", "pong")
@@ -223,6 +256,35 @@ class RelayClient(
                 val pingId = json.getString("pingId")
                 sendPong(pingId)
                 listener?.onPing(pingId)
+            }
+
+            "directory_listing" -> {
+                val entriesArr = json.optJSONArray("entries") ?: JSONArray()
+                val entries = (0 until entriesArr.length()).map { i ->
+                    val obj = entriesArr.getJSONObject(i)
+                    DirectoryEntry(
+                        name = obj.getString("name"),
+                        isDir = obj.optBoolean("isDir", false)
+                    )
+                }
+                listener?.onDirectoryListing(
+                    DirectoryListing(
+                        requestId   = json.getString("requestId"),
+                        path        = json.optString("path", ""),
+                        allowedRoot = json.optString("allowedRoot", ""),
+                        entries     = entries,
+                        parent      = if (json.has("parent")) json.getString("parent") else null,
+                        error       = if (json.has("error")) json.getString("error") else null
+                    )
+                )
+            }
+
+            "remote_session_started" -> {
+                listener?.onRemoteSessionStarted(
+                    requestId = json.getString("requestId"),
+                    channelId = if (json.has("channelId")) json.getString("channelId") else null,
+                    error     = if (json.has("error")) json.getString("error") else null
+                )
             }
 
             "error" -> listener?.onError(json.getString("message"))
