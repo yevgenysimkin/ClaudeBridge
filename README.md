@@ -45,9 +45,9 @@ Host orchestrator ──────outbound WSS───▶│   per-channel   
 
 **Default relay:** `https://cb.pinewell.xyz` (also reachable at `https://claudebridge-production.up.railway.app`).
 
-## Auth & phone provisioning — you do NOT paste tokens on the phone
+## Auth and phone provisioning
 
-The relay auth token is **provisioned automatically**, not typed into the app:
+**End users never paste auth tokens into the phone.** The relay auth token is **provisioned automatically**, not typed into the app:
 
 1. The **Chromattica desktop** mints the relay auth token (a UUID) on first launch if one isn't set, and syncs it up to chromattica-api.
 2. You sign into Chromattica on **both** desktop and phone with the **same email** (OTP login).
@@ -86,7 +86,7 @@ No volume needed — the relay keeps state in memory only.
 
 ### 2. Run a host
 
-**Preferred:** use the Chromattica desktop app — it spawns the PTY and registers the channel for you (`ClaudeBridgeManager::startSession(projectDir)`), and handles the auth token automatically (see [Auth & phone provisioning](#auth--phone-provisioning--you-do-not-paste-tokens-on-the-phone)).
+**Preferred:** use the Chromattica desktop app — it spawns the PTY and registers the channel for you (`ClaudeBridgeManager::startSession(projectDir)`), and handles the auth token automatically (see [Auth and phone provisioning](#auth-and-phone-provisioning)).
 
 **Standalone Node proxy** (legacy stream-JSON path):
 
