@@ -4,22 +4,31 @@ Monitor and drive your Claude Code sessions from your phone. ClaudeBridge pipes 
 
 This is the **v2 PTY architecture**. The earlier headless stream-JSON / Agent-SDK approach has been retired — it loses Claude MAX coverage after Anthropic's 2026-06-15 cutover, whereas an interactive PTY session stays MAX-covered. (A legacy Node stream-JSON orchestrator still lives in `proxy/`; see [Components](#components).)
 
-## Security note before you deploy
+## Bring your own relay
 
-The relay supports two auth modes:
+There is **no shared or official relay** — you host your own, on whatever always-on platform you like (e.g. Fly, Render, Railway, a VPS, or a box on your LAN — your call). It only needs to be reachable over `wss://` and stay running. The relay is a stateless WebSocket broker; nothing about it is tied to any one provider.
 
-- **Locked** (recommended) — set `RELAY_AUTH_TOKEN` to a shared secret. Only clients with the exact token authenticate.
-- **Pairing** — leave `RELAY_AUTH_TOKEN` unset and explicitly set `RELAY_ALLOW_PAIRING=1`. The relay then accepts any non-empty token and scopes channels by whichever token a client picks. Two strangers who happen to pick the same string see each other's PTY streams. **Only use pairing mode on a single-user / private host.** Without either env var, the relay refuses to start.
+### Relay auth: pairing mode
+
+The connection token is **auto-provisioned by the client, never set or pasted by you** (see [Auth and phone provisioning](#auth-and-phone-provisioning)). Because the desktop mints its own random token, your relay must run in **pairing mode** so it accepts that token and scopes channels to it:
+
+```
+RELAY_ALLOW_PAIRING=1     # and leave RELAY_AUTH_TOKEN unset
+```
+
+In pairing mode the relay accepts any non-empty token and isolates channels per token. Each install's token is a random UUID, so that UUID is effectively the access key to your channels — keep your relay private to you.
+
+Do **not** set `RELAY_AUTH_TOKEN` to a shared secret: there is no UI to feed such a secret to the desktop or phone, so the clients' auto-minted tokens would never match it and every connection would be rejected. (`RELAY_AUTH_TOKEN` / exact-match "locked" mode exists in the relay code, but it is incompatible with the auto-provisioned client token this product uses.)
 
 ## Supported topology
 
-One bot (host) per auth token. The relay forwards control-protocol messages (`list_directory`, `remote_start_session`) to *all* connected bots that share a token, and trusts whichever bot replies first. If you run two hosts on the same token, a buggy or malicious one can forge filesystem listings to the phone. Stick to one host per token until this is hardened.
+One host per token. The relay forwards control-protocol messages (`list_directory`, `remote_start_session`) to *all* connected hosts that share a token, and trusts whichever replies first. If you run two hosts on the same token, a buggy or malicious one can forge filesystem listings to the phone. Stick to one host per token until this is hardened.
 
 ## How It Works
 
 ```
-YOUR MACHINE                            RAILWAY (always-on)
-─────────────────────────               ─────────────────────
+YOUR MACHINE                            YOUR RELAY HOST (always-on)
+─────────────────────────               ───────────────────────────
 real `claude` PTY (forkpty)             ┌──────────────────┐
   │  raw bytes ↕                        │  WebSocket Relay  │
   ▼                                     │  (in-memory       │
@@ -29,7 +38,7 @@ Host orchestrator ──────outbound WSS───▶│   per-channel   
                                         └──────────────────┘
 ```
 
-- **Relay** runs on Railway — a stateless WebSocket broker. It keeps small in-memory per-channel buffers for non-terminal events; **terminal (`term_data`) traffic is live, not buffered** — the next PTY redraw covers a reconnecting client. There is no database.
+- **Relay** is a stateless WebSocket broker. State lives in memory only — there is no database, nothing survives a relay restart. It keeps small per-channel buffers: a 500-event ring for structured events, plus a rolling ~64 KB buffer of recent raw PTY bytes per channel, replayed to a reconnecting client so it gets an immediate redraw.
 - **Host orchestrator** spawns `claude` inside a real PTY and connects **outbound** to the relay (no inbound ports, no VPN). The primary host is the **Chromattica desktop app** (built-in C++/forkpty orchestrator). A standalone Node orchestrator also ships in `proxy/`.
 - **Android app** opens a WebSocket straight to the relay and renders the PTY stream in an xterm.js WebView. A foreground service keeps the connection alive for notifications.
 - **PTY protocol:** host → `term_data` (base64 raw bytes) → relay → app; app keystrokes → `term_input` (base64) → host's PTY master fd; viewport changes → `term_resize` (cols/rows) → `TIOCSWINSZ`.
@@ -38,51 +47,40 @@ Host orchestrator ──────outbound WSS───▶│   per-channel   
 
 | Component | Location | Runs on | Purpose |
 |-----------|----------|---------|---------|
-| **Relay** | `relay/` | Railway | WebSocket broker; auth, channel registry, control + PTY message routing |
+| **Relay** | `relay/` | your relay host (anywhere) | WebSocket broker; auth, channel registry, control + PTY message routing |
 | **Chromattica desktop** | (Chromattica repo, `native/src/services/CbOrchestrator*.cpp`) | Your Mac/PC | Primary host — forkpty `claude`, renders sessions in CEF + xterm.js |
 | **Node proxy** | `proxy/` | Your machine | Standalone orchestrator. **Legacy headless stream-JSON path** — superseded by the desktop PTY host and not MAX-covered after 2026-06-15 |
 | **Android app** | `android/` | Phone | Kotlin/Compose shell + xterm.js WebView session view |
 
-**Default relay:** `https://cb.pinewell.xyz` (also reachable at `https://claudebridge-production.up.railway.app`).
-
 ## Auth and phone provisioning
 
-**End users never paste auth tokens into the phone.** The relay auth token is **provisioned automatically**, not typed into the app:
+**End users never paste auth tokens into either client.** The relay connection token is **provisioned automatically**:
 
-1. The **Chromattica desktop** mints the relay auth token (a UUID) on first launch if one isn't set, and syncs it up to chromattica-api.
+1. The **Chromattica desktop** mints the token (a random UUID) on first launch if one isn't set, and syncs it up to chromattica-api.
 2. You sign into Chromattica on **both** desktop and phone with the **same email** (OTP login).
-3. The **Android app pulls the token (and relay URL) at OTP login** — it never generates one. The token field has been removed from the app's settings UI.
+3. The **Android app pulls the token (and relay URL) at OTP login** — it never generates one, and there is no token input field in its settings (just a read-only "Auth token synced" indicator).
 
 So end-user setup is: install the Claude CLI on the host, point the host at your relay's `wss://` URL, and sign in with the same account on desktop and phone. The phone is purely downstream of whatever the desktop wrote to chromattica-api — if the phone "sees nothing," confirm the desktop has logged in at least once since install.
-
-(Operators deploying their own relay still set `RELAY_AUTH_TOKEN` on the Railway service as the shared secret — that's the server side. The "no pasting" rule is about end users on the phone.)
 
 ## Quick Start
 
 ### Prerequisites
 
 - Node.js 22+
-- Railway CLI (`npm i -g @railway/cli && railway login`)
 - Claude Code CLI authenticated (MAX plan — no API key needed)
 - Android Studio (to build the APK) or a pre-built APK
+- An always-on host for the relay, reachable over `wss://` (your choice of platform)
 
-### 1. Deploy the relay to Railway
+### 1. Deploy the relay
 
 ```bash
 git clone https://github.com/yevgenysimkin/ClaudeBridge.git
-cd ClaudeBridge
-
-# Generate the shared auth token
-RELAY_AUTH_TOKEN=$(openssl rand -base64 32)
-echo "Your relay auth token: $RELAY_AUTH_TOKEN"
-
-cd relay && npm install && npm run build
-railway link
-railway variables set RELAY_AUTH_TOKEN="$RELAY_AUTH_TOKEN" PORT=3000
-railway up
+cd ClaudeBridge/relay
+npm install && npm run build
+RELAY_ALLOW_PAIRING=1 PORT=3000 npm start
 ```
 
-No volume needed — the relay keeps state in memory only.
+Run that on whatever always-on host you picked, behind TLS so clients reach it over `wss://`. No volume or database needed — the relay keeps all state in memory. (`RELAY_ALLOW_PAIRING=1` is required; see [Relay auth](#relay-auth-pairing-mode).)
 
 ### 2. Run a host
 
@@ -91,7 +89,7 @@ No volume needed — the relay keeps state in memory only.
 **Standalone Node proxy** (legacy stream-JSON path):
 
 ```bash
-cp .env.example .env          # set RELAY_URL and RELAY_AUTH_TOKEN
+cp .env.example .env          # set RELAY_URL to your relay's wss:// URL
 cd proxy && npm install
 npm run dev                    # or: npm run build && npm start
 ```
@@ -149,8 +147,8 @@ android/app/src/main/
     └── ui/
         ├── theme/                  — Material 3 dark theme
         ├── viewmodel/ChatViewModel.kt
-        └── screen/                 — ChannelList, Message, Settings,
-                                       NewSessionSheet, WebViewSession (xterm.js)
+        └── screen/                 — ChannelListScreen, MessageScreen, SettingsScreen,
+                                       NewSessionSheet, WebViewSessionScreen (xterm.js)
 ```
 
 ## License
