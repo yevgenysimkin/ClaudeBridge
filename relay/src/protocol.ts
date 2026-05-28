@@ -188,13 +188,14 @@ export interface RemoteSessionStarted {
   timestamp: number;
 }
 
-// --- PTY Protocol: Terminal byte streaming (live, not buffered) ---
+// --- PTY Protocol: Terminal byte streaming ---
 
 /**
  * Bot → relay → apps: raw PTY output bytes for live xterm.js rendering.
  * Base64-encoded so binary-safe over JSON.
- * NOT added to the history buffer — terminal state is live; reconnecting clients
- * see only what arrives after they connect.
+ * The relay keeps a rolling per-channel buffer of recent bytes (separate from
+ * the structured agent_event history ring) and replays it to a reconnecting
+ * client so it sees the recent terminal state instead of a blank xterm.
  */
 export interface TermData {
   type: "term_data";
