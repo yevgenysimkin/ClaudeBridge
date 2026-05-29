@@ -96,11 +96,16 @@ fun NewSessionSheet(
 
     // Keep effort valid for the selected model: if the model supports effort but
     // the current pick isn't one of its levels, default to the first level.
+    // Recompute the levels from the *current* model inside the effect rather
+    // than closing over the composition-scoped `effortLevels` val — that val is
+    // derived from selectedModel at the start of the pass, so when the block
+    // above corrects selectedModel this effect would otherwise see a stale list.
     LaunchedEffect(selectedModel, modelManifest) {
+        val levels = models.firstOrNull { it.id == selectedModel }?.effortLevels ?: emptyList()
         selectedEffort = when {
-            effortLevels.isEmpty() -> ""
-            selectedEffort in effortLevels -> selectedEffort
-            else -> effortLevels.first()
+            levels.isEmpty() -> ""
+            selectedEffort in levels -> selectedEffort
+            else -> levels.first()
         }
     }
 
