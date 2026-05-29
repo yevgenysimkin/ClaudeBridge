@@ -44,6 +44,10 @@ object BridgeState {
     private val _currentDirListing = MutableStateFlow<DirectoryListing?>(null)
     val currentDirListing: StateFlow<DirectoryListing?> = _currentDirListing
 
+    /** Latest model/effort catalog from the desktop (null until first reply). */
+    private val _modelManifest = MutableStateFlow<ModelManifest?>(null)
+    val modelManifest: StateFlow<ModelManifest?> = _modelManifest
+
     /**
      * Pending remote_start_session callbacks keyed by requestId. The sheet
      * registers a callback when it sends a Start request; the relay listener
@@ -167,6 +171,7 @@ object BridgeState {
         _error.value = null
         _allowedRoot.value = null
         _currentDirListing.value = null
+        _modelManifest.value = null
         _pendingStartRequests.clear()
     }
 
@@ -175,6 +180,10 @@ object BridgeState {
     fun applyDirectoryListing(listing: DirectoryListing) {
         _allowedRoot.value = listing.allowedRoot
         _currentDirListing.value = listing
+    }
+
+    fun applyModelManifest(manifest: ModelManifest) {
+        _modelManifest.value = manifest
     }
 
     fun registerStartRequest(requestId: String, onResolved: (String?, String?) -> Unit) {

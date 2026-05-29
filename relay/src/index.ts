@@ -17,6 +17,8 @@ import type {
   DirectoryListing,
   RemoteStartSession,
   RemoteSessionStarted,
+  ListModels,
+  ModelManifest,
 } from "./protocol.js";
 
 // --- Config ---
@@ -182,6 +184,12 @@ wss.on("connection", (ws) => {
         break;
       case "remote_session_started":
         handleRemoteSessionStarted(client, msg);
+        break;
+      case "list_models":
+        handleListModels(client, msg);
+        break;
+      case "model_manifest":
+        handleModelManifest(client, msg);
         break;
       case "ping":
         handlePing(client, msg.pingId);
@@ -470,6 +478,22 @@ function handleRemoteStartSession(client: Client, msg: RemoteStartSession): void
 function handleRemoteSessionStarted(client: Client, msg: RemoteSessionStarted): void {
   if (client.clientType !== "bot") {
     send(client.ws, { type: "error", message: "Only bot clients can send remote_session_started." });
+    return;
+  }
+  broadcastToApps(msg, client.token);
+}
+
+function handleListModels(client: Client, msg: ListModels): void {
+  if (client.clientType !== "app") {
+    send(client.ws, { type: "error", message: "Only app clients can send list_models." });
+    return;
+  }
+  broadcastToBots(msg, client.token);
+}
+
+function handleModelManifest(client: Client, msg: ModelManifest): void {
+  if (client.clientType !== "bot") {
+    send(client.ws, { type: "error", message: "Only bot clients can send model_manifest." });
     return;
   }
   broadcastToApps(msg, client.token);

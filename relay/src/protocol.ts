@@ -172,6 +172,8 @@ export interface RemoteStartSession {
   requestId: string;
   projectDir: string;
   model?: string;
+  /** Variable-effort level (CC 4.8+), e.g. "high". Absent = CLI/model default. */
+  effort?: string;
   skipPermissions?: boolean;
   timestamp: number;
 }
@@ -185,6 +187,39 @@ export interface RemoteSessionStarted {
   requestId: string;
   channelId?: string;
   error?: string;
+  timestamp: number;
+}
+
+/**
+ * App → bot: ask the desktop which Claude models (and per-model effort levels)
+ * are currently available. The desktop is the source of truth because it runs
+ * the CLI; it answers with model_manifest. Mirrors list_directory's request/
+ * reply shape so the relay just forwards it to the control bot.
+ */
+export interface ListModels {
+  type: "list_models";
+  requestId: string;
+  timestamp: number;
+}
+
+/** One selectable model plus the effort levels it supports (empty if none). */
+export interface ModelManifestEntry {
+  id: string;
+  label: string;
+  effortLevels: string[];
+}
+
+/**
+ * Bot → app: the desktop's live model catalog. The phone renders these in its
+ * "Start new session" picker instead of any hardcoded list, so new models /
+ * effort levels appear without shipping a new APK.
+ */
+export interface ModelManifest {
+  type: "model_manifest";
+  requestId: string;
+  models: ModelManifestEntry[];
+  /** Model id to pre-select when the phone has no stored preference. */
+  defaultModel: string;
   timestamp: number;
 }
 
@@ -244,6 +279,8 @@ export type ClientMessage =
   | DirectoryListing
   | RemoteStartSession
   | RemoteSessionStarted
+  | ListModels
+  | ModelManifest
   | Ping
   | Pong;
 
@@ -307,6 +344,8 @@ export type RelayMessage =
   | DirectoryListing
   | RemoteStartSession
   | RemoteSessionStarted
+  | ListModels
+  | ModelManifest
   | HistorySync
   | Ping
   | Pong

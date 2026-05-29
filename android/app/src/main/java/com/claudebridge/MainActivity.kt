@@ -66,6 +66,7 @@ fun ClaudeBridgeNavHost() {
     val currentChannel by vm.currentChannel.collectAsState()
     val allowedRoot by vm.allowedRoot.collectAsState()
     val currentDirListing by vm.currentDirListing.collectAsState()
+    val modelManifest by vm.modelManifest.collectAsState()
 
     var showNewSessionSheet by remember { mutableStateOf(false) }
 
@@ -118,9 +119,11 @@ fun ClaudeBridgeNavHost() {
                     prefs = prefs,
                     allowedRoot = allowedRoot ?: "",
                     currentDirListing = currentDirListing,
+                    modelManifest = modelManifest,
                     onBrowseTo = { path -> vm.listDirectory(path) },
-                    onStart = { projectDir, model, skipPerms, onResolved ->
-                        vm.remoteStartSession(projectDir, model, skipPerms, onResolved)
+                    onRequestModels = { vm.requestModels() },
+                    onStart = { projectDir, model, effort, skipPerms, onResolved ->
+                        vm.remoteStartSession(projectDir, model, effort, skipPerms, onResolved)
                     },
                     onCancelStart = { requestId -> vm.cancelStartRequest(requestId) },
                     onSessionStarted = { channelId ->

@@ -38,6 +38,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val error = BridgeState.error
     val allowedRoot = BridgeState.allowedRoot
     val currentDirListing = BridgeState.currentDirListing
+    val modelManifest = BridgeState.modelManifest
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -128,6 +129,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         service?.listDirectory(java.util.UUID.randomUUID().toString(), path)
     }
 
+    /** Ask the desktop for its live model/effort catalog (NewSessionSheet open). */
+    fun requestModels() {
+        service?.listModels(java.util.UUID.randomUUID().toString())
+    }
+
     /**
      * Provoke a new CB session on the connected desktop. Resolves the
      * callback with (channelId, error) — one of them will be non-null.
@@ -138,6 +144,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun remoteStartSession(
         projectDir: String,
         model: String?,
+        effort: String?,
         skipPermissions: Boolean,
         onResolved: (channelId: String?, error: String?) -> Unit
     ): String {
@@ -152,7 +159,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         BridgeState.registerStartRequest(requestId) { chId, err ->
             mainHandler.post { onResolved(chId, err) }
         }
-        svc.remoteStartSession(requestId, projectDir, model, skipPermissions)
+        svc.remoteStartSession(requestId, projectDir, model, effort, skipPermissions)
         return requestId
     }
 

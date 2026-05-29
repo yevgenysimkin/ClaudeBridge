@@ -25,6 +25,8 @@ class RelayClient(
         fun onDirectoryListing(listing: DirectoryListing) {}
         /** Remote-control: response to a remote_start_session request. */
         fun onRemoteSessionStarted(requestId: String, channelId: String?, error: String?) {}
+        /** Remote-control: the desktop's live model/effort catalog. */
+        fun onModelManifest(manifest: ModelManifest) {}
     }
 
     var listener: Listener? = null
@@ -180,11 +182,22 @@ class RelayClient(
         webSocket?.send(msg.toString())
     }
 
+    /** Ask the desktop control bot for its live model/effort catalog. */
+    fun sendListModels(requestId: String) {
+        val msg = JSONObject().apply {
+            put("type", "list_models")
+            put("requestId", requestId)
+            put("timestamp", System.currentTimeMillis())
+        }
+        webSocket?.send(msg.toString())
+    }
+
     /** Provoke a new CB session on the connected desktop. */
     fun sendRemoteStartSession(
         requestId: String,
         projectDir: String,
         model: String?,
+        effort: String?,
         skipPermissions: Boolean
     ) {
         val msg = JSONObject().apply {
@@ -192,6 +205,7 @@ class RelayClient(
             put("requestId", requestId)
             put("projectDir", projectDir)
             if (model != null) put("model", model)
+            if (!effort.isNullOrEmpty()) put("effort", effort)
             put("skipPermissions", skipPermissions)
             put("timestamp", System.currentTimeMillis())
         }
@@ -303,6 +317,26 @@ class RelayClient(
                 val err   = if (json.has("error")) json.getString("error") else null
                 Log.d(TAG, "remote_session_started reqId=$reqId chId=$chId err=$err")
                 listener?.onRemoteSessionStarted(reqId, chId, err)
+            }
+
+            "model_manifest" -> {
+                val modelsArr = json.optJSONArray("models") ?: JSONArray()
+                val models = (0 until modelsArr.length()).map { i ->
+                    val obj = modelsArr.getJSONObject(i)
+                    val levelsArr = obj.optJSONArray("effortLevels") ?: JSONArray()
+                    ModelManifestEntry(
+                        id = obj.getString("id"),
+                        label = obj.optString("label", obj.getString("id")),
+                        effortLevels = (0 until levelsArr.length()).map { levelsArr.getString(it) }
+                    )
+                }
+                listener?.onModelManifest(
+                    ModelManifest(
+                        requestId = json.optString("requestId", ""),
+                        models = models,
+                        defaultModel = json.optString("defaultModel", "")
+                    )
+                )
             }
 
             "error" -> listener?.onError(json.getString("message"))

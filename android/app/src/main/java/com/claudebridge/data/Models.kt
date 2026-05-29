@@ -85,6 +85,24 @@ data class DirectoryListing(
     val error: String?
 )
 
+/** One selectable Claude model plus the effort levels it supports (empty = none). */
+data class ModelManifestEntry(
+    val id: String,
+    val label: String,
+    val effortLevels: List<String>
+)
+
+/**
+ * The desktop's live model catalog, returned in response to a list_models
+ * request. The NewSessionSheet renders these instead of any hardcoded list, so
+ * new models / effort levels show up without a new APK.
+ */
+data class ModelManifest(
+    val requestId: String,
+    val models: List<ModelManifestEntry>,
+    val defaultModel: String
+)
+
 /** A file attachment to send with a user prompt. */
 data class FileAttachment(
     val filename: String,

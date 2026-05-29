@@ -257,6 +257,10 @@ class RelayService : Service(), RelayClient.Listener {
         BridgeState.resolveStartRequest(requestId, channelId, error)
     }
 
+    override fun onModelManifest(manifest: ModelManifest) {
+        BridgeState.applyModelManifest(manifest)
+    }
+
     // --- Public API for remote-control feature ---
 
     /** Ask the desktop control bot for a directory listing. */
@@ -264,14 +268,20 @@ class RelayService : Service(), RelayClient.Listener {
         relayClient?.sendListDirectory(requestId, path)
     }
 
+    /** Ask the desktop control bot for its live model/effort catalog. */
+    fun listModels(requestId: String) {
+        relayClient?.sendListModels(requestId)
+    }
+
     /** Provoke a new CB session on the connected desktop. */
     fun remoteStartSession(
         requestId: String,
         projectDir: String,
         model: String?,
+        effort: String?,
         skipPermissions: Boolean
     ) {
-        relayClient?.sendRemoteStartSession(requestId, projectDir, model, skipPermissions)
+        relayClient?.sendRemoteStartSession(requestId, projectDir, model, effort, skipPermissions)
     }
 
     // --- Private ---

@@ -43,6 +43,14 @@ class Preferences(context: Context) {
         get() = prefs.getBoolean(KEY_SKIP_PERMS, false)
         set(value) = prefs.edit().putBoolean(KEY_SKIP_PERMS, value).apply()
 
+    /**
+     * Last effort level selected in the sheet (e.g. "high"). Empty = none/
+     * model-default. Pre-populates the effort dropdown next time.
+     */
+    var lastEffort: String
+        get() = prefs.getString(KEY_LAST_EFFORT, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LAST_EFFORT, value).apply()
+
     /** True if relay credentials are configured (logged in AND relay bound). */
     val isConfigured: Boolean
         get() = relayUrl.isNotBlank() && authToken.isNotBlank()
@@ -63,6 +71,7 @@ class Preferences(context: Context) {
         private const val KEY_SESSION_TOKEN = "session_token"
         private const val KEY_EMAIL = "email"
         private const val KEY_LAST_MODEL = "last_model"
+        private const val KEY_LAST_EFFORT = "last_effort"
         private const val KEY_SKIP_PERMS = "skip_perms"
         const val DEFAULT_MODEL = "claude-opus-4-7"
     }

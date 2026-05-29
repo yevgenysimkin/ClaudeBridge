@@ -16,6 +16,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.claudebridge.data.DirectoryListing
+import com.claudebridge.data.ModelManifest
+import com.claudebridge.data.ModelManifestEntry
 import com.claudebridge.data.Preferences
 import com.claudebridge.ui.theme.*
 import kotlinx.coroutines.delay
@@ -31,13 +33,8 @@ import kotlinx.coroutines.delay
 
 private const val START_TIMEOUT_MS = 15_000L
 
-private data class ModelOption(val id: String, val label: String)
-
-private val MODEL_OPTIONS = listOf(
-    ModelOption("claude-opus-4-7",   "Opus 4.7"),
-    ModelOption("claude-opus-4-6",   "Opus 4.6"),
-    ModelOption("claude-sonnet-4-6", "Sonnet"),
-)
+private fun String.effortLabel(): String =
+    replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,12 +42,15 @@ fun NewSessionSheet(
     prefs: Preferences,
     allowedRoot: String,
     currentDirListing: DirectoryListing?,
+    modelManifest: ModelManifest?,
     onBrowseTo: (path: String?) -> Unit,
+    onRequestModels: () -> Unit,
     // Returns the requestId so the sheet can cancel it on timeout/dismiss
     // (so a late reply doesn't fire onSessionStarted after the user gave up).
     onStart: (
         projectDir: String,
         model: String,
+        effort: String,
         skipPermissions: Boolean,
         onResolved: (channelId: String?, error: String?) -> Unit
     ) -> String,
@@ -63,14 +63,46 @@ fun NewSessionSheet(
     // Local UI state — survives recomposition but not process death (sheet is
     // ephemeral; if the user backgrounds the app and returns, fine to reset).
     var selectedModel by remember { mutableStateOf(prefs.lastModel) }
+    var selectedEffort by remember { mutableStateOf(prefs.lastEffort) }
     var skipPerms by remember { mutableStateOf(prefs.skipPermsPreference) }
     var modelMenuOpen by remember { mutableStateOf(false) }
+    var effortMenuOpen by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
     var startError by remember { mutableStateOf<String?>(null) }
     var pendingRequestId by remember { mutableStateOf("") }
 
-    // First open of the sheet: kick off a listing at the allowed root.
-    LaunchedEffect(Unit) { onBrowseTo(null) }
+    // Models come from the desktop (it runs the CLI, so it's authoritative).
+    // Until the manifest arrives, fall back to the last-used model as a single
+    // entry so the sheet is usable immediately; the list swaps in on reply.
+    val models: List<ModelManifestEntry> = modelManifest?.models?.takeIf { it.isNotEmpty() }
+        ?: listOf(ModelManifestEntry(prefs.lastModel, prefs.lastModel, emptyList()))
+    val effortLevels = models.firstOrNull { it.id == selectedModel }?.effortLevels ?: emptyList()
+
+    // First open: list the allowed root and ask the desktop for its model catalog.
+    LaunchedEffect(Unit) {
+        onBrowseTo(null)
+        onRequestModels()
+    }
+
+    // When the manifest (re)arrives, keep the selection valid: if the stored
+    // model isn't offered, fall back to the desktop's default, then the newest.
+    LaunchedEffect(modelManifest) {
+        val ids = models.map { it.id }
+        if (selectedModel !in ids) {
+            selectedModel = modelManifest?.defaultModel?.takeIf { it in ids }
+                ?: ids.firstOrNull().orEmpty()
+        }
+    }
+
+    // Keep effort valid for the selected model: if the model supports effort but
+    // the current pick isn't one of its levels, default to the first level.
+    LaunchedEffect(selectedModel, modelManifest) {
+        selectedEffort = when {
+            effortLevels.isEmpty() -> ""
+            selectedEffort in effortLevels -> selectedEffort
+            else -> effortLevels.first()
+        }
+    }
 
     // Timeout: if the desktop doesn't reply within START_TIMEOUT_MS, give the
     // user back control instead of leaving them staring at a "Starting…"
@@ -184,7 +216,7 @@ fun NewSessionSheet(
                 modifier = Modifier.padding(vertical = 8.dp)
             )
 
-            // --- Model + skip-perms ----------------------------------------
+            // --- Model + effort --------------------------------------------
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -193,7 +225,7 @@ fun NewSessionSheet(
                 Spacer(Modifier.width(12.dp))
                 Box {
                     OutlinedButton(onClick = { modelMenuOpen = true }) {
-                        Text(MODEL_OPTIONS.firstOrNull { it.id == selectedModel }?.label
+                        Text(models.firstOrNull { it.id == selectedModel }?.label
                              ?: selectedModel)
                         Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                     }
@@ -201,7 +233,7 @@ fun NewSessionSheet(
                         expanded = modelMenuOpen,
                         onDismissRequest = { modelMenuOpen = false }
                     ) {
-                        MODEL_OPTIONS.forEach { opt ->
+                        models.forEach { opt ->
                             DropdownMenuItem(
                                 text = { Text(opt.label) },
                                 onClick = {
@@ -209,6 +241,33 @@ fun NewSessionSheet(
                                     modelMenuOpen = false
                                 }
                             )
+                        }
+                    }
+                }
+
+                // Effort selector — only for models that support variable effort.
+                if (effortLevels.isNotEmpty()) {
+                    Spacer(Modifier.width(12.dp))
+                    Text("Effort:", color = ClaudeOnBackground, fontSize = 14.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Box {
+                        OutlinedButton(onClick = { effortMenuOpen = true }) {
+                            Text(selectedEffort.ifEmpty { effortLevels.first() }.effortLabel())
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                        }
+                        DropdownMenu(
+                            expanded = effortMenuOpen,
+                            onDismissRequest = { effortMenuOpen = false }
+                        ) {
+                            effortLevels.forEach { level ->
+                                DropdownMenuItem(
+                                    text = { Text(level.effortLabel()) },
+                                    onClick = {
+                                        selectedEffort = level
+                                        effortMenuOpen = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -251,9 +310,11 @@ fun NewSessionSheet(
                     starting = true
                     startError = null
                     // Persist choices so the next open of the sheet defaults to them.
+                    val effortToSend = if (effortLevels.isEmpty()) "" else selectedEffort
                     prefs.lastModel = selectedModel
+                    prefs.lastEffort = effortToSend
                     prefs.skipPermsPreference = skipPerms
-                    pendingRequestId = onStart(path, selectedModel, skipPerms) { channelId, error ->
+                    pendingRequestId = onStart(path, selectedModel, effortToSend, skipPerms) { channelId, error ->
                         pendingRequestId = ""
                         starting = false
                         if (channelId != null) {
